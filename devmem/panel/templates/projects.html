@@ -1,1 +1,21 @@
-{% extends 'base.html' %}{% block body %}<h1>Projects</h1><table><tr><th>Project</th><th>Tokens</th><th>Sessions</th><th>Memories</th><th>Last activity</th></tr>{% for x in rows %}<tr><td><a href="/projects/detail?path={{x.project|urlencode}}">{{x.project}}</a></td><td>{{x.tokens}}</td><td>{{x.sessions}}</td><td>{{x.memories}}</td><td>{{x.activity}}</td></tr>{% endfor %}</table>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Projects · devmem{% endblock %}
+{% block body %}
+<h1>Projects</h1>
+<table>
+  <thead>
+    <tr><th>Project</th><th class="num">Tokens</th><th class="num">Sessions</th><th class="num">Memories</th><th>Last activity</th></tr>
+  </thead>
+  <tbody>
+  {% for x in rows %}
+    <tr>
+      <td><a class="mono" href="/projects/detail?path={{ x.project | urlencode }}">{{ x.project }}</a></td>
+      <td class="num" data-tokens="{{ x.tokens }}">{{ x.tokens }}</td>
+      <td class="num">{{ x.sessions }}</td>
+      <td class="num">{{ x.memories }}</td>
+      <td><time data-rel datetime="{{ x.activity }}">{{ x.activity }}</time></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -10,48 +10,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
-def now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def db_path() -> Path:
-    return Path(os.environ.get("DEVMEM_DB", "~/.devmem/devmem.db")).expanduser()
-
-
-def connect(path: Path | None = None) -> sqlite3.Connection:
-    path = path or db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    migrate(conn)
-    return conn
-
-
-@contextmanager
-def connection(path: Path | None = None) -> Iterator[sqlite3.Connection]:
-    conn = connect(path)
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def migrate(conn: sqlite3.Connection) -> None:
-    conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
-    row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
-    if row is None:
-        conn.execute("INSERT INTO schema_version VALUES (0)")
-        version = 0
-    else:
-        version = row[0]
-    if version < 1:
-        conn.executescript("""
+# Version 1 schema, kept verbatim: later versions migrate from it additively.
+V1_SCHEMA = """
         CREATE TABLE memories (
           id INTEGER PRIMARY KEY, project TEXT, kind TEXT NOT NULL CHECK(kind IN ('note','decision','preference','snippet','todo')),
           title TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '',
@@ -93,9 +56,111 @@ def migrate(conn: sqlite3.Connection) -> None:
         CREATE INDEX usage_project_ts ON usage_events(project, ts);
         CREATE INDEX usage_session_ts ON usage_events(session_id, ts);
         CREATE INDEX tool_calls_client_at ON tool_calls(client_id, at DESC);
-        """)
-        conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
+"""
+
+
+def now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def db_path() -> Path:
+    return Path(os.environ.get("DEVMEM_DB", "~/.devmem/devmem.db")).expanduser()
+
+
+def connect(path: Path | None = None) -> sqlite3.Connection:
+    path = path or db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=10, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    migrate(conn)
+    return conn
+
+
+@contextmanager
+def connection(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    conn = connect(path)
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+    row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+    if row is None:
+        conn.execute("INSERT INTO schema_version VALUES (0)")
+        version = 0
+    else:
+        version = row[0]
+    if version < 1:
+        conn.executescript(V1_SCHEMA)
+        conn.execute("UPDATE schema_version SET version=1")
     conn.commit()
+    if version < 2:
+        _migrate_v2(conn)
+
+
+_V2_STATEMENTS = (
+    # Additive only: no existing row or column is removed.
+    "ALTER TABLE rate_limits ADD COLUMN label TEXT",
+    # Last time the (unchanged) values were observed; rows are only inserted when values change.
+    "ALTER TABLE rate_limits ADD COLUMN observed_at TEXT",
+    "UPDATE rate_limits SET label = CASE window_minutes WHEN 300 THEN 'primary' WHEN 10080 THEN 'secondary' END "
+    "WHERE label IS NULL AND agent='codex'",
+    # Parser state (e.g. Codex session/model) so resumed files need not be re-read from byte 0.
+    "ALTER TABLE ingest_offsets ADD COLUMN context TEXT",
+    """CREATE TABLE activity_events (
+      id INTEGER PRIMARY KEY, agent TEXT NOT NULL, session_id TEXT, project TEXT, ts TEXT,
+      kind TEXT NOT NULL, name TEXT, summary TEXT,
+      source_file TEXT NOT NULL, source_offset INTEGER NOT NULL,
+      UNIQUE(source_file, source_offset)
+    )""",
+    "CREATE INDEX activity_ts ON activity_events(ts)",
+    "CREATE INDEX activity_session_ts ON activity_events(session_id, ts)",
+    "CREATE INDEX activity_project_ts ON activity_events(project, ts)",
+    "CREATE INDEX rate_limits_agent_label ON rate_limits(agent, label, id)",
+    "CREATE INDEX usage_ts ON usage_events(ts)",
+)
+
+
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    """v1 -> v2.  Runs in one IMMEDIATE transaction and re-checks the version, so concurrent processes are safe."""
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 2:
+            for statement in _V2_STATEMENTS:
+                conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=2")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def parse_ts(value) -> datetime | None:
+    """Parse the mixed timestamp formats found in logs (ISO with Z/offset/space, or unix epoch) to aware UTC."""
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().replace(".", "", 1).isdigit()):
+            return datetime.fromtimestamp(float(value), UTC)
+        text = str(value).strip().replace(" ", "T", 1)
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def iso(value) -> str | None:
+    parsed = parse_ts(value)
+    return parsed.astimezone(UTC).isoformat() if parsed else None
 
 
 def fts_query(text: str) -> str:

@@ -1,1 +1,49 @@
-{% extends 'base.html' %}{% block body %}<h1>Session {{session_id}}</h1><canvas id="timeline"></canvas><script>const e={{events|tojson}};new Chart(document.querySelector('#timeline'),{type:'line',data:{labels:e.map(x=>x.ts),datasets:[{label:'tokens',data:e.map(x=>x.input_tokens+x.output_tokens+x.cache_read_tokens)}]}})</script><table>{% for x in events %}<tr><td>{{x.ts}}</td><td>{{x.input_tokens}}</td><td>{{x.output_tokens}}</td><td>{{x.cache_read_tokens}}</td></tr>{% endfor %}</table>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Session · devmem{% endblock %}
+{% block body %}
+<h1>Session <span class="mono">{{ session_id }}</span></h1>
+<div class="card"><svg id="timeline" class="chart"></svg></div>
+
+<h2>Tool activity</h2>
+<table>
+  <thead><tr><th>When</th><th>Agent</th><th>Tool</th><th>Summary</th></tr></thead>
+  <tbody>
+  {% for x in activity %}
+    <tr>
+      <td><time data-rel datetime="{{ x.ts }}">{{ x.ts }}</time></td>
+      <td><span class="badge {{ x.agent }}">{{ x.agent }}</span></td>
+      <td>{{ x.name }}</td>
+      <td class="muted">{{ x.summary }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No activity recorded.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Usage events</h2>
+<table>
+  <thead><tr><th>When</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Cache write</th></tr></thead>
+  <tbody>
+  {% for x in events %}
+    <tr>
+      <td class="mono">{{ x.ts }}</td>
+      <td class="num">{{ x.input_tokens }}</td>
+      <td class="num">{{ x.output_tokens }}</td>
+      <td class="num">{{ x.cache_read_tokens }}</td>
+      <td class="num">{{ x.cache_write_tokens }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
+{% block scripts %}
+<script>
+  (function () {
+    const e = {{ events | tojson }};
+    const rows = e.slice(-120).map(x => ({ x: x.ts, series: {
+      input: x.input_tokens, output: x.output_tokens, cache: x.cache_read_tokens + x.cache_write_tokens } }));
+    devmem.barChart(document.querySelector('#timeline'), rows, { input: '#a78bfa', output: '#22d3ee', cache: '#3b4a7a' });
+  })();
+</script>
+{% endblock %}

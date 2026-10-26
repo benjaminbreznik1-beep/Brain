@@ -1,1 +1,64 @@
-{% extends 'base.html' %}{% block body %}<h1>Memory</h1><form method="get"><input name="q" value="{{q}}" placeholder="Search"><select name="kind"><option value="">All kinds</option>{% for c in counts %}<option {% if kind==c.kind %}selected{% endif %}>{{c.kind}}</option>{% endfor %}</select><button>Search</button></form><p>{% for c in counts %}{{c.kind}}: {{c.count}} {% endfor %}</p><details><summary>Create memory</summary><form method="post"><input name="title" placeholder="Title"><select name="kind"><option>note</option><option>decision</option><option>preference</option><option>snippet</option><option>todo</option></select><input name="tags" placeholder="tags"><input name="project" placeholder="project path (optional)"><textarea name="content" required></textarea><button>Save</button></form></details>{% for x in rows %}<details class="card"><summary>[{{x.kind}}] {{x.title}} <span class="muted">{{x.updated_at}}</span></summary><form method="post" action="/memory/{{x.id}}"><input name="title" value="{{x.title}}"><select name="kind">{% for k in ['note','decision','preference','snippet','todo'] %}<option {% if x.kind==k %}selected{% endif %}>{{k}}</option>{% endfor %}</select><input name="tags" value="{{x.tags}}"><textarea name="content">{{x.content}}</textarea><button>Update</button></form><form method="post" action="/memory/{{x.id}}/delete"><button>Delete</button></form></details>{% endfor %}{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Memory · devmem{% endblock %}
+{% block body %}
+<h1>Memory</h1>
+
+<form method="get" class="form-row">
+  <input name="q" value="{{ q }}" placeholder="Search memories" size="32">
+  <select name="kind">
+    <option value="">All kinds</option>
+    {% for c in counts %}
+    <option {% if kind == c.kind %}selected{% endif %}>{{ c.kind }}</option>
+    {% endfor %}
+  </select>
+  <button>Search</button>
+</form>
+
+<div class="pill-row">
+  {% for c in counts %}
+  <span class="badge kind-{{ c.kind }}">{{ c.kind }} · {{ c.count }}</span>
+  {% endfor %}
+</div>
+
+<details class="card">
+  <summary>Create memory</summary>
+  <form method="post">
+    <div class="form-row">
+      <input name="title" placeholder="Title">
+      <select name="kind">
+        <option>note</option><option>decision</option><option>preference</option><option>snippet</option><option>todo</option>
+      </select>
+      <input name="tags" placeholder="tags">
+      <input name="project" placeholder="project path (optional)" size="36">
+    </div>
+    <textarea name="content" required></textarea>
+    <button>Save</button>
+  </form>
+</details>
+
+{% for x in rows %}
+<details class="card">
+  <summary>
+    <span class="badge kind-{{ x.kind }}">{{ x.kind }}</span>
+    {{ x.title }}
+    <span class="muted"> · {{ x.project or 'global' }} · <time data-rel datetime="{{ x.updated_at }}">{{ x.updated_at }}</time></span>
+  </summary>
+  <form method="post" action="/memory/{{ x.id }}">
+    <div class="form-row">
+      <input name="title" value="{{ x.title }}" size="40">
+      <select name="kind">
+        {% for k in ['note', 'decision', 'preference', 'snippet', 'todo'] %}
+        <option {% if x.kind == k %}selected{% endif %}>{{ k }}</option>
+        {% endfor %}
+      </select>
+      <input name="tags" value="{{ x.tags }}" placeholder="tags">
+    </div>
+    <textarea name="content">{{ x.content }}</textarea>
+    <button>Update</button>
+  </form>
+  <form method="post" action="/memory/{{ x.id }}/delete">
+    <button class="danger">Delete</button>
+  </form>
+</details>
+{% endfor %}
+{% endblock %}

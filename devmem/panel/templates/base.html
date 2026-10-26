@@ -1,1 +1,32 @@
-<!doctype html><html><head><meta charset="utf-8"><title>devmem</title><link rel="stylesheet" href="/static/site.css"><script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script></head><body><nav><a href="/">Overview</a><a href="/projects">Projects</a><a href="/sessions">Sessions</a><a href="/agents">Agents</a><a href="/memory">Memory</a></nav>{% block body %}{% endblock %}</body></html>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}devmem{% endblock %}</title>
+  <link rel="stylesheet" href="/static/site.css">
+  {% block head %}{% endblock %}
+</head>
+<body class="{% block body_class %}{% endblock %}">
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-dot"></span>devmem</a>
+    <nav>
+      <a href="/" class="{{ 'on' if active == 'brain' }}">Brain</a>
+      <a href="/overview" class="{{ 'on' if active == 'overview' }}">Overview</a>
+      <a href="/projects" class="{{ 'on' if active in ('projects', 'project') }}">Projects</a>
+      <a href="/sessions" class="{{ 'on' if active in ('sessions', 'session') }}">Sessions</a>
+      <a href="/agents" class="{{ 'on' if active == 'agents' }}">Agents</a>
+      <a href="/memory" class="{{ 'on' if active == 'memory' }}">Memory</a>
+    </nav>
+    <span class="spacer"></span>
+    {% block topbar_extra %}{% endblock %}
+  </header>
+  {% block main %}
+  <main class="page">
+    {% block body %}{% endblock %}
+  </main>
+  {% endblock %}
+  <script src="/static/common.js"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

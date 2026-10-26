@@ -1,1 +1,48 @@
-{% extends 'base.html' %}{% block body %}<h1>{{project}}</h1><h2>Usage events</h2><table>{% for x in events %}<tr><td>{{x.ts}}</td><td>{{x.agent}}</td><td>{{x.input_tokens+x.output_tokens+x.cache_read_tokens}}</td></tr>{% endfor %}</table><h2>Memories</h2>{% for x in memories %}<div class="card"><b>{{x.title}}</b> — {{x.content}}</div>{% endfor %}{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Project · devmem{% endblock %}
+{% block body %}
+<h1 class="mono">{{ project }}</h1>
+
+<h2>Memories</h2>
+{% for x in memories %}
+<div class="card">
+  <span class="badge kind-{{ x.kind }}">{{ x.kind }}</span>
+  <b>{{ x.title }}</b>
+  <div class="muted" style="white-space:pre-wrap;margin-top:.4rem">{{ x.content }}</div>
+</div>
+{% else %}
+<p class="muted">No memories for this project.</p>
+{% endfor %}
+
+<h2>Recent activity</h2>
+<table>
+  <thead><tr><th>When</th><th>Agent</th><th>Tool</th><th>Summary</th></tr></thead>
+  <tbody>
+  {% for x in activity %}
+    <tr>
+      <td><time data-rel datetime="{{ x.ts }}">{{ x.ts }}</time></td>
+      <td><span class="badge {{ x.agent }}">{{ x.agent }}</span></td>
+      <td>{{ x.name }}</td>
+      <td class="muted">{{ x.summary }}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No activity recorded.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Usage events</h2>
+<table>
+  <thead><tr><th>When</th><th>Agent</th><th>Model</th><th class="num">Tokens</th></tr></thead>
+  <tbody>
+  {% for x in events %}
+    <tr>
+      <td><time data-rel datetime="{{ x.ts }}">{{ x.ts }}</time></td>
+      <td><span class="badge {{ x.agent }}">{{ x.agent }}</span></td>
+      <td class="muted">{{ x.model }}</td>
+      <td class="num">{{ x.input_tokens + x.output_tokens + x.cache_read_tokens + x.cache_write_tokens }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

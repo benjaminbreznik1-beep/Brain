@@ -1,1 +1,24 @@
-{% extends 'base.html' %}{% block body %}<h1>Sessions</h1><table><tr><th>Agent</th><th>Project</th><th>Model</th><th>Start/end</th><th>Turns</th><th>Input/output/cache</th></tr>{% for x in rows %}<tr><td>{{x.agent}}</td><td>{{x.project}}</td><td>{{x.model}}</td><td><a href="/sessions/{{x.session_id}}">{{x.start}} → {{x.end}}</a></td><td>{{x.turns}}</td><td>{{x.input}} / {{x.output}} / {{x.cache}}</td></tr>{% endfor %}</table>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Sessions · devmem{% endblock %}
+{% block body %}
+<h1>Sessions</h1>
+<table>
+  <thead>
+    <tr><th>Agent</th><th>Project</th><th>Model</th><th>Start → end</th><th class="num">Turns</th><th class="num">Input / output / cache</th></tr>
+  </thead>
+  <tbody>
+  {% for x in rows %}
+    <tr>
+      <td><span class="badge {{ x.agent }}">{{ x.agent }}</span></td>
+      <td class="mono">{{ x.project }}</td>
+      <td class="muted">{{ x.model }}</td>
+      <td><a href="/sessions/{{ x.session_id }}">{{ x.start }} → {{ x.end }}</a></td>
+      <td class="num">{{ x.turns }}</td>
+      <td class="num"><span data-tokens="{{ x.input }}">{{ x.input }}</span> /
+        <span data-tokens="{{ x.output }}">{{ x.output }}</span> /
+        <span data-tokens="{{ x.cache }}">{{ x.cache }}</span></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

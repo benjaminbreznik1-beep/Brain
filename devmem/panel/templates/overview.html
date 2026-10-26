@@ -1,1 +1,66 @@
-{% extends 'base.html' %}{% block body %}<h1>Overview</h1><p class="muted">Tokens from local logs. Claude subscription limits are not exposed in logs.</p><div class="totals">{% for x in totals %}<div class="card"><b>{{x.agent}}</b><br>Today {{x.today or 0}}<br>7d {{x.week or 0}}<br>30d {{x.month or 0}}</div>{% endfor %}</div><canvas id="chart"></canvas><h2>Top projects</h2><table><tr><th>Project</th><th>Tokens</th></tr>{% for x in projects %}<tr><td>{{x.project}}</td><td>{{x.tokens}}</td></tr>{% endfor %}</table><h2>Latest Codex limits</h2>{% for x in limits %}<p>{{x.window_minutes}} min: {{x.used_percent}}% — resets {{x.resets_at}}</p>{% endfor %}<script>const d={{daily|tojson}};new Chart(document.querySelector('#chart'),{type:'bar',data:{labels:[...new Set(d.map(x=>x.day))],datasets:[...new Set(d.map(x=>x.agent))].map(a=>({label:a,data:[...new Set(d.map(x=>x.day))].map(day=>(d.find(x=>x.day==day&&x.agent==a)||{}).tokens||0}))},options:{scales:{x:{stacked:true},y:{stacked:true}}}})</script>{% endblock %}
+{% extends 'base.html' %}
+{% block title %}Overview · devmem{% endblock %}
+{% block body %}
+<h1>Overview</h1>
+<p class="muted">Token figures come from local logs. Limits come from Codex logs and the Claude status line snapshot.</p>
+
+<div class="grid-cards">
+  {% for x in totals %}
+  <div class="card">
+    <span class="badge {{ x.agent }}">{{ x.agent }}</span>
+    <div class="stat-label" style="margin-top:.6rem">Last 24 h</div>
+    <div class="stat-value" data-tokens="{{ x.today or 0 }}">{{ x.today or 0 }}</div>
+    <div class="muted">7d <span data-tokens="{{ x.week or 0 }}">{{ x.week or 0 }}</span>
+      · 30d <span data-tokens="{{ x.month or 0 }}">{{ x.month or 0 }}</span></div>
+  </div>
+  {% endfor %}
+</div>
+
+<h2>Daily tokens, last 30 days</h2>
+<div class="card"><svg id="chart" class="chart"></svg></div>
+
+<h2>Limits</h2>
+<table>
+  <thead><tr><th>Agent</th><th>Window</th><th class="num">Used</th><th>Resets</th><th>As of</th></tr></thead>
+  <tbody>
+  {% for x in limits %}
+    <tr>
+      <td><span class="badge {{ x.agent }}">{{ x.agent }}</span></td>
+      <td>{{ x.label }}{% if x.window_minutes %} <span class="muted">({{ x.window_minutes }} min)</span>{% endif %}</td>
+      <td class="num">{{ x.used_percent }}%</td>
+      <td>{{ x.resets_at or '—' }}</td>
+      <td><time data-rel datetime="{{ x.as_of }}">{{ x.as_of }}</time>{% if x.stale %} <span class="badge">stale</span>{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">No limit data yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<h2>Top projects by tokens</h2>
+<table>
+  <thead><tr><th>Project</th><th class="num">Tokens</th></tr></thead>
+  <tbody>
+  {% for x in projects %}
+    <tr>
+      <td class="mono">{{ x.project }}</td>
+      <td class="num" data-tokens="{{ x.tokens }}">{{ x.tokens }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
+{% block scripts %}
+<script>
+  (function () {
+    const d = {{ daily | tojson }};
+    const days = [...new Set(d.map(x => x.day))];
+    const rows = days.map(day => {
+      const series = {};
+      d.filter(x => x.day === day).forEach(x => { series[x.agent] = x.tokens || 0; });
+      return { x: day, series };
+    });
+    devmem.barChart(document.querySelector('#chart'), rows, devmem.agentColors);
+  })();
+</script>
+{% endblock %}
