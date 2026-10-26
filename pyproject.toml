@@ -1,0 +1,23 @@
+[project]
+name = "devmem"
+version = "0.1.0"
+description = "Local long-term coding memory MCP server and usage dashboard"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "jinja2>=3.1,<4",
+  "mcp>=1.9,<2",
+  "uvicorn>=0.30,<1",
+]
+
+[project.scripts]
+devmem = "devmem.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

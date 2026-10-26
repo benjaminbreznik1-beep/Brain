@@ -1,0 +1,1 @@
+{% extends 'base.html' %}{% block body %}<h1>{{project}}</h1><h2>Usage events</h2><table>{% for x in events %}<tr><td>{{x.ts}}</td><td>{{x.agent}}</td><td>{{x.input_tokens+x.output_tokens+x.cache_read_tokens}}</td></tr>{% endfor %}</table><h2>Memories</h2>{% for x in memories %}<div class="card"><b>{{x.title}}</b> — {{x.content}}</div>{% endfor %}{% endblock %}
