@@ -6,11 +6,13 @@
 {% block body_class %}wall-page{% endblock %}
 {% block topbar_extra %}
   <span class="clock" id="clock">--:--</span>
+  <button class="ghost" id="dim-toggle" type="button" title="Switch between the 3D web and the 2D brain">3D</button>
   <button class="ghost" id="wall-toggle" type="button" title="Wall mode: hide navigation (key W)">Wall mode</button>
 {% endblock %}
 {% block main %}
 <div class="status" id="status" data-state="connecting"><span class="dot"></span><span class="txt">connecting</span></div>
-<button class="wall-exit" id="wall-exit" type="button" title="Show navigation (key W)">☰</button>
+<button class="wall-exit" id="wall-exit" type="button" title="Leave wall mode (W or Esc)">☰ Menu</button>
+<div class="wall-hint" id="wall-hint" hidden>W / Esc to exit wall mode</div>
 
 <main class="wall">
   <section class="col col-left">
@@ -28,6 +30,7 @@
   <section class="col col-centre">
     <div class="brain-wrap" id="brain-wrap">
       <canvas id="brain" aria-label="Live memory and agent network"></canvas>
+      <div class="brain3d" id="brain3d" hidden aria-label="Live memory and agent network, 3D"></div>
       <div class="brain-tip" id="brain-tip" hidden></div>
       <div class="brain-legend">
         <span><i style="--c:var(--claude)"></i>Claude</span>
@@ -78,6 +81,8 @@
 </main>
 {% endblock %}
 {% block scripts %}
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <!-- The only external resource. If it fails to load, the page falls back to the 2D canvas brain. -->
+  <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.3/dist/3d-force-graph.min.js" crossorigin="anonymous"></script>
+  <script src="/static/brain3d.js"></script>
   <script src="/static/brain.js"></script>
 {% endblock %}

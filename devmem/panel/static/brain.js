@@ -30,20 +30,35 @@
 
   // ------------------------------------------------------------------ wall mode + clock
 
+  // The body state class is "wall-mode": plain "wall" collided with the .wall grid container.
+  var hintTimer = null;
+
+  function showWallHint() {
+    var hint = $("wall-hint");
+    hint.hidden = false;
+    hint.classList.add("show");
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(function () { hint.classList.remove("show"); }, 3000);
+  }
+
+  function isWall() { return document.body.classList.contains("wall-mode"); }
+
   function setWall(on) {
-    document.body.classList.toggle("wall", on);
+    document.body.classList.toggle("wall-mode", on);
     try { localStorage.setItem("devmem.wall", on ? "1" : "0"); } catch (e) { /* storage unavailable */ }
-    setTimeout(function () { Brain.resize(); }, 50);
+    if (on) showWallHint();
+    setTimeout(function () { if (window.devmemBrain) window.devmemBrain.resize(); }, 50);
   }
   (function initWall() {
     var on = false;
     try { on = localStorage.getItem("devmem.wall") === "1"; } catch (e) { /* ignore */ }
-    if (on) document.body.classList.add("wall");
+    if (on) { document.body.classList.add("wall-mode"); showWallHint(); }
     $("wall-toggle").addEventListener("click", function () { setWall(true); });
     $("wall-exit").addEventListener("click", function () { setWall(false); });
     document.addEventListener("keydown", function (e) {
-      if ((e.key === "w" || e.key === "W") && !e.ctrlKey && !e.metaKey && !/input|textarea|select/i.test(e.target.tagName))
-        setWall(!document.body.classList.contains("wall"));
+      if (e.ctrlKey || e.metaKey || e.altKey || /input|textarea|select/i.test(e.target.tagName)) return;
+      if (e.key === "w" || e.key === "W") setWall(!isWall());
+      else if (e.key === "Escape" && isWall()) setWall(false);
     });
   })();
 
@@ -254,7 +269,7 @@
 
   // ------------------------------------------------------------------ brain renderer
 
-  var Brain = (function () {
+  var Brain2D = (function () {
     var canvas = $("brain"), wrap = $("brain-wrap"), tip = $("brain-tip");
     var ctx = canvas.getContext("2d");
     var W = 0, H = 0, DPR = 1, G = null;        // size and geometry
@@ -263,7 +278,7 @@
     var sim = null, hasD3 = !!(window.d3 && window.d3.forceSimulation);
     var impulses = [], flashes = {}, pendingBloom = {};
     var sprites = {};
-    var running = false, lastFrame = 0, firstGraph = true, dirty = true, hover = null;
+    var running = false, lastFrame = 0, firstGraph = true, dirty = true, hover = null, active = true;
     var start = performance.now();
     var FONT = getComputedStyle(document.body).fontFamily;
 
@@ -738,7 +753,7 @@
     }
 
     function loop(now) {
-      if (!running) return;
+      if (!running || !active) { running = false; return; }
       requestAnimationFrame(loop);
       var simActive = sim && sim.alpha() > sim.alphaMin();
       var busy = simActive || impulses.length > 0;
@@ -752,7 +767,7 @@
 
     function kick() {
       dirty = true;
-      if (document.hidden) return;
+      if (document.hidden || !active) return;
       if (!running) { running = true; requestAnimationFrame(loop); }
     }
 
@@ -814,9 +829,71 @@
     if (window.ResizeObserver) new ResizeObserver(function () { resize(); }).observe(wrap);
     else window.addEventListener("resize", resize);
 
+    function setActive(on) {
+      active = on;
+      canvas.hidden = !on;
+      if (!on) { tip.hidden = true; running = false; } else { resize(); kick(); }
+    }
+
     resize();
-    return { setGraph: setGraph, pulse: pulse, resize: resize };
+    return { setGraph: setGraph, pulse: pulse, resize: resize, setActive: setActive };
   })();
+
+  // ------------------------------------------------------------------ 2D / 3D switch
+
+  var Brain = (function () {
+    var mode = "3d", impl3d = null, lastGraph = null, reason = "";
+    var btn = $("dim-toggle"), box3d = $("brain3d");
+    try { mode = localStorage.getItem("devmem.brainMode") === "2d" ? "2d" : "3d"; } catch (e) { /* default 3D */ }
+
+    function ensure3d() {
+      if (impl3d) return true;
+      if (!window.DevmemBrain3D || !window.ForceGraph3D) { reason = "3D library did not load"; return false; }
+      if (!window.DevmemBrain3D.available()) { reason = "WebGL unavailable"; return false; }
+      try {
+        box3d.hidden = false;
+        impl3d = window.DevmemBrain3D.create(box3d, { agentColor: agentColor, agentShort: agentShort, esc: esc, reduced: REDUCED });
+        if (lastGraph) impl3d.setGraph(lastGraph);
+        return true;
+      } catch (err) {
+        console.error("devmem 3D failed, using 2D", err);
+        reason = "3D failed to start";
+        box3d.hidden = true;
+        impl3d = null;
+        return false;
+      }
+    }
+
+    function apply(wanted, remember) {
+      var use3d = wanted === "3d" && ensure3d();
+      mode = use3d ? "3d" : "2d";
+      box3d.hidden = !use3d;
+      $("brain-wrap").classList.toggle("is3d", use3d);
+      if (impl3d) impl3d.setActive(use3d);
+      if (use3d && lastGraph) impl3d.setGraph(lastGraph); // merge by id: positions are kept
+      Brain2D.setActive(!use3d);
+      if (!use3d && lastGraph) Brain2D.setGraph(lastGraph);
+      btn.textContent = use3d ? "3D" : "2D";
+      btn.title = use3d ? "Showing the 3D web; click for the flat 2D brain" :
+        (wanted === "3d" && reason ? "3D unavailable (" + reason + "); showing 2D" : "Showing the 2D brain; click for the 3D web");
+      btn.classList.toggle("unavailable", wanted === "3d" && !use3d);
+      if (remember) { try { localStorage.setItem("devmem.brainMode", wanted); } catch (e) { /* ignore */ } }
+    }
+
+    btn.addEventListener("click", function () { apply(mode === "3d" ? "2d" : "3d", true); });
+    apply(mode, false);
+
+    return {
+      setGraph: function (g) {
+        lastGraph = g;
+        if (mode === "3d" && impl3d) impl3d.setGraph(g); else Brain2D.setGraph(g);
+      },
+      pulse: function (p) { if (mode === "3d" && impl3d) impl3d.pulse(p); else Brain2D.pulse(p); },
+      resize: function () { if (mode === "3d" && impl3d) impl3d.resize(); else Brain2D.resize(); },
+      mode: function () { return mode; },
+    };
+  })();
+  window.devmemBrain = Brain;
 
   // ------------------------------------------------------------------ state + stream
 
@@ -881,6 +958,5 @@
 
   window.addEventListener("resize", function () { if (lastState && lastState.tokens) renderSpark(lastState.tokens.hourly || {}); });
 
-  if (!window.d3) console.warn("d3 not loaded (offline?): brain uses a static layout");
   connect();
 })();
