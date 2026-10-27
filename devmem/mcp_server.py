@@ -6,14 +6,108 @@ import json
 import os
 import time
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .db import connection, hybrid_search, now, project_for_cwd
+from .db import connection, context_text, hybrid_search, now, project_for_cwd
 
 mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; save durable decisions, preferences, and hard-won gotchas. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
 _client_name: str | None = None
+
+
+class _PanelNoRedirect(HTTPRedirectHandler):
+    """Keep a panel redirect from causing an unreviewed follow-up request."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# This opener is deliberately used only by the two fixed loopback URLs below.
+_PANEL_OPENER = build_opener(ProxyHandler({}), _PanelNoRedirect())
+
+
+def _panel_urls() -> tuple[str, str]:
+    """Return the only panel URLs this process is permitted to request."""
+    raw_port = os.environ.get("DEVMEM_PANEL_PORT", "8765")
+    try:
+        port = int(raw_port)
+    except ValueError:
+        port = 8765
+    if not 1 <= port <= 65535:
+        port = 8765
+    base = f"http://127.0.0.1:{port}"
+    return base + "/api/ado", base + "/ado/refresh"
+
+
+def _panel_snapshot(refresh: bool) -> dict[str, Any]:
+    """Read the panel-owned ADO cache without following any redirect."""
+    api_url, refresh_url = _panel_urls()
+    if refresh:
+        try:
+            with _PANEL_OPENER.open(Request(refresh_url, method="POST"), timeout=20) as response:
+                # A direct 2xx response is also harmless if the panel implementation changes.
+                status = getattr(response, "status", None)
+                if status is None:
+                    status = response.getcode()
+                if status not in (200, 201, 202, 204, 303):
+                    raise OSError("panel refresh failed")
+        except HTTPError as exc:
+            # The panel normally returns this redirect.  It is intentionally not followed.
+            if exc.code != 303:
+                raise
+    with _PANEL_OPENER.open(Request(api_url, method="GET"), timeout=3) as response:
+        payload = response.read().decode("utf-8")
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise ValueError("panel returned an invalid snapshot")
+    return data
+
+
+def _ado_unavailable(reason: str) -> dict[str, Any]:
+    return {"available": False, "reason": reason}
+
+
+def _ado_pr(pr: dict[str, Any], pending_reviewers: bool = False) -> dict[str, Any]:
+    item = {key: pr.get(key) for key in ("id", "title", "repo", "url", "age_label")}
+    if pending_reviewers:
+        item["pending_reviewers"] = list(pr.get("pending_reviewers") or [])
+    return item
+
+
+def _ado_status(snapshot: dict[str, Any], section: str) -> dict[str, Any]:
+    if not snapshot.get("configured"):
+        return _ado_unavailable("ADO not configured (no token)")
+    result: dict[str, Any] = {
+        "available": True,
+        "refreshed_at": snapshot.get("refreshed_at"),
+        "stale": bool(snapshot.get("stale")),
+        "error": snapshot.get("error"),
+        "project_active_count": snapshot.get("project_active_count", 0),
+    }
+    if section in ("all", "waiting_for_me"):
+        result["waiting_for_me"] = {
+            "to_review": [_ado_pr(pr) for pr in snapshot.get("to_review", [])],
+            "approved_not_completed": [_ado_pr(pr) for pr in snapshot.get("my_approved_not_completed", [])],
+            "changes_requested": [_ado_pr(pr) for pr in snapshot.get("my_changes_requested", [])],
+        }
+    if section in ("all", "waiting_on_others"):
+        result["waiting_on_others"] = [
+            _ado_pr(pr, pending_reviewers=True) for pr in snapshot.get("my_waiting_on_others", [])
+        ]
+    if section in ("all", "tasks"):
+        tasks = [
+            {key: task.get(key) for key in ("id", "title", "type", "state", "url")}
+            for task in snapshot.get("open_tasks", [])
+        ]
+        tasks.sort(key=lambda task: (task["state"] != "In Progress", task["state"] or "", task["id"]))
+        result["tasks"] = tasks
+        result["tasks_by_state"] = {
+            state: len(items) for state, items in (snapshot.get("open_tasks_by_state") or {}).items()
+        }
+    return result
 
 
 def _client(ctx: Context | None = None) -> tuple[int, str | None]:
@@ -129,14 +223,24 @@ def project_context(ctx: Context | None = None) -> str:
     def work():
         _, project = _client()
         with connection() as conn:
-            rows = conn.execute("""SELECT kind,title,content FROM memories WHERE project=? AND kind IN ('decision','preference','todo','note')
-                ORDER BY kind='note', updated_at DESC LIMIT 20""", (project,)).fetchall()
-            global_rows = conn.execute("SELECT kind,title,content FROM memories WHERE project IS NULL AND kind IN ('decision','preference') ORDER BY updated_at DESC LIMIT 40").fetchall()
-        text = "\n".join(f"[{r['kind']}] {r['title']}: {r['content'][:200]}" for r in rows)[:1500]
-        global_text = "\n".join(f"[{r['kind']}] {r['title']}" for r in global_rows)[:3000]  # titles state the rule; memory_get has the detail
-        parts = [f"## Project\n{text}" if text else "", f"## Global preferences\n{global_text}" if global_text else ""]
-        return "\n\n".join(p for p in parts if p) or "No saved project context."
+            return context_text(conn, project)
     return _call("project_context", {}, work, ctx)
+
+
+@mcp.tool(description="Read-only view of the user's Azure DevOps: PRs waiting for them, their PRs waiting on others, and their open work items. Use when asked about tasks, PRs, or what to work on.")
+def ado_status(section: str = "all", refresh: bool = False, ctx: Context | None = None) -> dict:
+    """Return a compact, token-free projection of the running panel's ADO cache."""
+    def work():
+        if section not in {"all", "waiting_for_me", "waiting_on_others", "tasks"}:
+            raise ValueError("section must be all, waiting_for_me, waiting_on_others, or tasks")
+        try:
+            snapshot = _panel_snapshot(refresh)
+        except (HTTPError, URLError, OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            # Do not expose upstream messages; they can include arbitrary response data.
+            port = _panel_urls()[0].rsplit(":", 1)[1].split("/", 1)[0]
+            return _ado_unavailable(f"devmem panel not running on 127.0.0.1:{port}")
+        return _ado_status(snapshot, section)
+    return _call("ado_status", {"section": section, "refresh": refresh}, work, ctx)
 
 
 def _shutdown() -> None:

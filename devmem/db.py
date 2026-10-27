@@ -95,6 +95,21 @@ def connection(path: Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+@contextmanager
+def readonly_connection(path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    """Open an existing database without creating it or applying migrations."""
+    path = path or db_path()
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=1,
+                           check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
     row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
@@ -338,3 +353,14 @@ def project_for_cwd(cwd: str | None) -> str | None:
         if (candidate / ".git").exists():
             return str(candidate)
     return str(current)
+
+
+def context_text(conn: sqlite3.Connection, project: str | None) -> str:
+    """Render the compact project and global-memory briefing."""
+    rows = conn.execute("""SELECT kind,title,content FROM memories WHERE project=? AND kind IN ('decision','preference','todo','note')
+        ORDER BY kind='note', updated_at DESC LIMIT 20""", (project,)).fetchall()
+    global_rows = conn.execute("SELECT kind,title,content FROM memories WHERE project IS NULL AND kind IN ('decision','preference') ORDER BY updated_at DESC LIMIT 40").fetchall()
+    text = "\n".join(f"[{r['kind']}] {r['title']}: {r['content'][:200]}" for r in rows)[:1500]
+    global_text = "\n".join(f"[{r['kind']}] {r['title']}" for r in global_rows)[:3000]  # titles state the rule; memory_get has the detail
+    parts = [f"## Project\n{text}" if text else "", f"## Global preferences\n{global_text}" if global_text else ""]
+    return "\n\n".join(p for p in parts if p) or "No saved project context."
