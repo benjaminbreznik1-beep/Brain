@@ -11,7 +11,7 @@ def test_brain_page_assets(tmp_path, monkeypatch):
     monkeypatch.setenv("DEVMEM_DB", str(tmp_path / "p.db"))
     from devmem.panel import app as panel
 
-    html = TestClient(panel.app).get("/").text
+    html = TestClient(panel.app, base_url="http://127.0.0.1").get("/").text
     external = re.findall(r'<script src="(https?://[^"]+)"', html)
     assert external == ["https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.3/dist/3d-force-graph.min.js"]
     assert html.index("3d-force-graph") < html.index("/static/brain3d.js") < html.index("/static/brain.js")

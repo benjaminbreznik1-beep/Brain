@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import json
+import numpy as np
 from pathlib import Path
-from urllib.error import URLError
+from io import BytesIO
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler
 
 import pytest
 
 from devmem import ado, mcp_server
+from devmem.db import EMBEDDING_DIM, EMBEDDING_MODEL, connect, embedding_hash
+from devmem.embed import set_embedder
 
 
 class _Response:
@@ -73,10 +78,41 @@ def test_refresh_posts_then_gets_only_fixed_panel_urls(monkeypatch):
     ]
 
 
+def test_panel_opener_rejects_redirects_and_only_fixed_urls_are_used(monkeypatch):
+    real_opener = mcp_server._PANEL_OPENER
+    opener = _PanelOpener(json.dumps(_snapshot()).encode())
+    monkeypatch.setattr(mcp_server, "_PANEL_OPENER", opener)
+    monkeypatch.setenv("DEVMEM_PANEL_PORT", "9876")
+    mcp_server._panel_snapshot(refresh=True)
+    api, refresh = mcp_server._panel_urls()
+    assert {url for url, _, _ in opener.calls} <= {api, refresh}
+    assert mcp_server._PanelNoRedirect().redirect_request(None, None, 302, "", {}, "x") is None
+    assert not any(isinstance(h, HTTPRedirectHandler) and not isinstance(h, mcp_server._PanelNoRedirect)
+                   for h in real_opener.handlers)
+
+
+def test_refresh_redirect_then_get_and_panel_failures(monkeypatch):
+    class RedirectThenGet:
+        def __init__(self): self.calls = []
+        def open(self, request, timeout):
+            self.calls.append((request.get_method(), request.full_url))
+            if request.get_method() == "POST":
+                raise HTTPError(request.full_url, 303, "See Other", {}, BytesIO())
+            return _Response(json.dumps(_snapshot()).encode())
+    opener = RedirectThenGet(); monkeypatch.setattr(mcp_server, "_PANEL_OPENER", opener)
+    assert mcp_server._panel_snapshot(True)["configured"] is True
+    assert [method for method, _ in opener.calls] == ["POST", "GET"]
+    class ServerError:
+        def open(self, request, timeout): raise HTTPError(request.full_url, 500, "oops", {}, BytesIO())
+    monkeypatch.setattr(mcp_server, "_PANEL_OPENER", ServerError())
+    monkeypatch.setattr(mcp_server, "_call", lambda tool, args, fn, ctx=None: fn())
+    assert mcp_server.ado_status() == {"available": False, "reason": "panel returned HTTP 500"}
+
+
 def test_panel_down_and_not_configured_are_safe_unavailable_results(monkeypatch):
     class _Down:
         def open(self, request, timeout):
-            raise URLError("offline")
+            raise URLError(ConnectionRefusedError())
 
     monkeypatch.setattr(mcp_server, "_PANEL_OPENER", _Down())
     monkeypatch.setattr(mcp_server, "_call", lambda tool, args, fn, ctx=None: fn())
@@ -87,16 +123,54 @@ def test_panel_down_and_not_configured_are_safe_unavailable_results(monkeypatch)
     }
 
 
-def test_no_unapproved_url_can_be_requested(monkeypatch):
-    requested = []
-
-    class _Guard:
+def test_panel_defaults_section_validation_and_timeout_note(monkeypatch):
+    monkeypatch.delenv("DEVMEM_PANEL_PORT", raising=False)
+    assert mcp_server._panel_urls() == ("http://127.0.0.1:8765/api/ado", "http://127.0.0.1:8765/ado/refresh")
+    for bad in ("0", "70000", "abc"):
+        monkeypatch.setenv("DEVMEM_PANEL_PORT", bad)
+        assert ":8765/" in mcp_server._panel_urls()[0]
+    for section in ("all", "tasks", "waiting_for_me", "waiting_on_others"):
+        assert mcp_server._ado_status(_snapshot(), section)["available"] is True
+    monkeypatch.setattr(mcp_server, "_call", lambda tool, args, fn, ctx=None: fn())
+    with pytest.raises(ValueError):
+        mcp_server.ado_status(section="bad")
+    assert mcp_server._ado_status({"pending": True}, "all") == {"available": False, "reason": "ADO data not loaded yet (first refresh pending)"}
+    class TimeoutThenCached:
         def open(self, request, timeout):
-            requested.append(request.full_url)
-            raise AssertionError("network request attempted")
+            if request.get_method() == "POST": raise URLError(TimeoutError())
+            return _Response(json.dumps(_snapshot()).encode())
+    monkeypatch.setattr(mcp_server, "_PANEL_OPENER", TimeoutThenCached())
+    data = mcp_server._panel_snapshot(True)
+    assert data.pop("_refresh_timed_out") is True
 
-    monkeypatch.setattr(mcp_server, "_PANEL_OPENER", _Guard())
-    monkeypatch.setenv("DEVMEM_PANEL_PORT", "not-a-port")
-    with pytest.raises(AssertionError):
-        mcp_server._panel_snapshot(refresh=False)
-    assert requested == ["http://127.0.0.1:8765/api/ado"]
+
+def test_memory_search_scopes_use_real_scope_sql_with_semantic_results(tmp_path, monkeypatch):
+    db_file = tmp_path / "memory.db"
+    project = str(tmp_path / "project")
+    monkeypatch.setenv("DEVMEM_DB", str(db_file))
+    conn = connect(db_file)
+    ids = {}
+    for label, selected_project in (("project", project), ("global", None), ("other", "/other")):
+        memory_id = conn.execute("INSERT INTO memories(project,kind,title,content,tags,created_at,updated_at) VALUES(?, 'note', ?, 'unrelated', '', 'x', 'x')",
+                                 (selected_project, label)).lastrowid
+        vector = np.zeros(EMBEDDING_DIM, dtype=np.float32); vector[0] = 1
+        conn.execute("INSERT INTO memory_embeddings(memory_id,model,dim,content_hash,vec) VALUES(?,?,?,?,?)",
+                     (memory_id, EMBEDDING_MODEL, EMBEDDING_DIM, embedding_hash(label, "unrelated", ""), vector.tobytes()))
+        ids[label] = memory_id
+    conn.commit(); conn.close()
+
+    class Embedder:
+        def embed(self, texts, *, query=False):
+            values = np.zeros((len(texts), EMBEDDING_DIM), dtype=np.float32); values[:, 0] = 1
+            return values
+
+    monkeypatch.delenv("DEVMEM_EMBED", raising=False)
+    monkeypatch.setattr(mcp_server, "_call", lambda tool, args, fn, ctx=None: fn())
+    monkeypatch.setattr(mcp_server, "_client", lambda ctx=None: (1, project))
+    set_embedder(Embedder())
+    try:
+        assert [row["id"] for row in mcp_server.memory_search("needle", scope="project")] == [ids["project"]]
+        assert [row["id"] for row in mcp_server.memory_search("needle", scope="global")] == [ids["global"]]
+        assert {row["id"] for row in mcp_server.memory_search("needle", scope="all")} == set(ids.values())
+    finally:
+        set_embedder(None)

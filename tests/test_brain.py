@@ -1,6 +1,9 @@
 """Tests for schema v2, activity parsing, limit ingestion and the live API (synthetic data only)."""
+import asyncio
 import json
+import os
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 
 from devmem.db import SCHEMA_VERSION, V1_SCHEMA, connect
@@ -81,6 +84,7 @@ def test_v1_to_v2_migration_keeps_data(tmp_path):
     assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'uv'").fetchone()[0] == 1
+    assert conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_embeddings'").fetchone()
     assert conn.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0] == 1
     assert [r[0] for r in conn.execute("SELECT label FROM rate_limits ORDER BY id")] == ["primary", "secondary", "primary"]
     assert conn.execute("SELECT byte_offset, context FROM ingest_offsets").fetchone()[:] == (123, None)
@@ -206,7 +210,7 @@ def test_api_state_shape(tmp_path, monkeypatch):
     since = live.cursor(conn)
     conn.close()
 
-    client = TestClient(panel.app)  # not used as a context manager: no background ingest of real logs
+    client = TestClient(panel.app, base_url="http://127.0.0.1")  # not used as a context manager: no background ingest of real logs
     s = client.get("/api/state").json()
     assert {"now", "limits", "tokens", "agents", "activity", "graph", "counts", "cursor"} <= set(s)
     five = next(l for l in s["limits"] if l["agent"] == "claude")
@@ -236,5 +240,68 @@ def test_api_state_shape(tmp_path, monkeypatch):
     assert new["activity"] > since["activity"] and live.pulses_since(conn, new)[0] == []
     conn.close()
 
-    for page in ("/", "/overview", "/projects", "/sessions", "/agents", "/memory", "/projects/detail?path=/work/demo", "/sessions/s1"):
+    for page in ("/", "/overview", "/projects", "/sessions", "/agents", "/memory", "/ado", "/projects/detail?path=/work/demo", "/sessions/s1"):
         assert client.get(page).status_code == 200, page
+
+
+def test_memory_search_edit_forms_keep_each_matching_memorys_full_fields(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from devmem.panel import app as panel
+    monkeypatch.setenv("DEVMEM_DB", str(tmp_path / "memory.db"))
+    conn = connect()
+    for title, content, tags in (("First", "needle first body", "first-tag"), ("Second", "needle second body", "second-tag")):
+        conn.execute("INSERT INTO memories(project,kind,title,content,tags,created_at,updated_at) VALUES(NULL,'note',?,?,?,?,?)", (title, content, tags, _ts(), _ts()))
+    conn.commit(); conn.close()
+    html = TestClient(panel.app, base_url="http://127.0.0.1").get("/memory?q=needle").text
+    assert 'value="first-tag"' in html and 'value="second-tag"' in html
+    assert "needle first body" in html and "needle second body" in html
+
+
+def test_overview_today_and_daily_bucket_use_local_zagreb_date(tmp_path, monkeypatch):
+    if time.localtime().tm_hour == 0 and time.localtime().tm_min < 2:
+        import pytest
+        pytest.skip("avoid crossing the real local-day boundary during this assertion")
+    from fastapi.testclient import TestClient
+    from devmem.panel import app as panel
+    old_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "Europe/Zagreb")
+    time.tzset()
+    try:
+        monkeypatch.setenv("DEVMEM_DB", str(tmp_path / "overview.db"))
+        midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+        conn = connect()
+        for stamp, tokens in ((midnight - timedelta(minutes=1), 3), (midnight + timedelta(minutes=1), 11)):
+            conn.execute("INSERT INTO usage_events(agent,session_id,project,model,ts,input_tokens,source_file,source_offset) VALUES('tz','s','/p','m',?,?, 'f',?)",
+                         (stamp.astimezone(UTC).isoformat(), tokens, tokens))
+        conn.commit(); conn.close()
+        html = TestClient(panel.app, base_url="http://127.0.0.1").get("/overview").text
+        assert 'data-tokens="11"' in html
+        assert f'"day": "{midnight.date()}"' in html and '"tokens": 11' in html
+    finally:
+        if old_tz is None: os.environ.pop("TZ", None)
+        else: os.environ["TZ"] = old_tz
+        time.tzset()
+
+
+def test_sse_generator_stops_promptly_after_shutdown_event(tmp_path, monkeypatch):
+    from starlette.requests import Request
+    from devmem.panel import app as panel
+    monkeypatch.setenv("DEVMEM_DB", str(tmp_path / "stream.db"))
+    panel._shutdown_event.clear()
+
+    async def drive():
+        scope = {"type": "http", "method": "GET", "path": "/api/stream", "raw_path": b"/api/stream",
+                 "query_string": b"", "headers": [], "client": ("127.0.0.1", 1),
+                 "server": ("127.0.0.1", 8765), "scheme": "http"}
+        response = await panel.api_stream(Request(scope))
+        iterator = response.body_iterator
+        assert "event: state" in await anext(iterator)
+        panel._shutdown_event.set()
+        try:
+            await asyncio.wait_for(anext(iterator), timeout=1)
+        except StopAsyncIteration:
+            return
+        raise AssertionError("SSE generator yielded after shutdown")
+
+    try: asyncio.run(drive())
+    finally: panel._shutdown_event.clear()

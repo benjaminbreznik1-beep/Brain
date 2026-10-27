@@ -1,5 +1,7 @@
 import io
 import json
+import os
+import subprocess
 import sys
 
 from devmem import cli, db, mcp_server
@@ -71,3 +73,45 @@ def test_context_hook_is_quiet_for_garbage_stdin_missing_or_empty_db(tmp_path, m
     monkeypatch.setenv("DEVMEM_DB", str(empty))
     result = _run_cli(monkeypatch, capsys, ["context", "--hook"], "not json")
     assert result.out == ""
+
+
+def test_context_hook_handles_non_sqlite_missing_db_and_non_mapping_payloads(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    garbage = tmp_path / "garbage.db"
+    garbage.write_text("not sqlite")
+    monkeypatch.setenv("DEVMEM_DB", str(garbage))
+    result = _run_cli(monkeypatch, capsys, ["context", "--hook"], "[]")
+    assert result.out == ""
+
+    missing = tmp_path / "does-not-exist.db"
+    monkeypatch.setenv("DEVMEM_DB", str(missing))
+    result = _run_cli(monkeypatch, capsys, ["context", "--hook"], '{"cwd": 5}')
+    assert result.out == "" and not missing.exists()
+
+    project = tmp_path / "project"; (project / ".git").mkdir(parents=True)
+    db_file = tmp_path / "memory.db"
+    monkeypatch.setenv("DEVMEM_DB", str(db_file))
+    with connection() as conn: _insert(conn, str(project), "note", "Fallback cwd", "works")
+    monkeypatch.chdir(project)
+    for payload in ("[]", '{"cwd": 5}'):
+        result = _run_cli(monkeypatch, capsys, ["context", "--hook"], payload)
+        assert "Fallback cwd" in result.out
+
+
+def test_context_hook_subprocess_never_imports_fastembed(tmp_path):
+    db_file = tmp_path / "garbage.db"; db_file.write_text("not sqlite")
+    script = '''
+import builtins, sys
+from devmem import cli
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name == "fastembed" or name.startswith("fastembed."):
+        raise AssertionError("fastembed imported")
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+sys.argv = ["devmem", "context", "--hook"]
+cli.main()
+'''
+    env = {**os.environ, "DEVMEM_DB": str(db_file), "DEVMEM_EMBED": "1"}
+    result = subprocess.run([sys.executable, "-c", script], input="[]", text=True, capture_output=True, env=env, cwd=tmp_path)
+    assert result.returncode == 0 and result.stdout == ""
