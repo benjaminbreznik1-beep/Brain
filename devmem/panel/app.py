@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from ..db import connection, fts_query, now
+from ..db import connection, ensure_embeddings, fts_query, hybrid_search, now
 from ..ingest.runner import ingest_all
 from ..ado import AdoClient, AdoError, empty_snapshot
 from . import state as live
@@ -38,6 +38,9 @@ def _ingest_loop(stop: threading.Event):
     while True:
         try:
             ingest_all()
+            # Backfill is best-effort and may lazily load the local model; it never affects writes.
+            with connection() as conn:
+                ensure_embeddings(conn)
         except Exception:  # dashboard remains usable if one log is malformed/unreadable
             log.exception("ingest pass failed")
         if stop.wait(INGEST_EVERY_S):
@@ -307,15 +310,15 @@ def agents(request: Request):
 
 @app.get("/memory")
 def memory(request: Request, q: str = "", kind: str = ""):
-    sql = "SELECT * FROM memories"
-    params = []
     if q and fts_query(q):
-        sql = "SELECT m.* FROM memories_fts JOIN memories m ON m.id=memories_fts.rowid WHERE memories_fts MATCH ?"
-        params = [fts_query(q)]
-    if kind:
-        sql += (" AND" if " WHERE " in sql else " WHERE") + " kind=?"
-        params.append(kind)
-    rows = _rows(sql + " ORDER BY updated_at DESC LIMIT 200", params)
+        with connection() as conn:
+            rows = hybrid_search(conn, q, where_sql="1=1", kind=kind or None, limit=200)
+    else:
+        sql, params = "SELECT * FROM memories", []
+        if kind:
+            sql += " WHERE kind=?"
+            params.append(kind)
+        rows = _rows(sql + " ORDER BY updated_at DESC LIMIT 200", params)
     return render(request, "memory.html", rows=rows, q=q, kind=kind,
                   counts=_rows("SELECT kind,COUNT(*) count FROM memories GROUP BY kind"))
 

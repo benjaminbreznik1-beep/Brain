@@ -3,7 +3,7 @@ import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-from devmem.db import V1_SCHEMA, connect
+from devmem.db import SCHEMA_VERSION, V1_SCHEMA, connect
 from devmem.ingest.claude import parse_record as claude_record
 from devmem.ingest.codex import parse_record as codex_record
 from devmem.ingest.runner import ingest_claude_limits, ingest_file
@@ -78,7 +78,7 @@ def test_v1_to_v2_migration_keeps_data(tmp_path):
     raw.close()
 
     conn = connect(path)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'uv'").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM usage_events").fetchone()[0] == 1

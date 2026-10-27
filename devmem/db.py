@@ -4,13 +4,20 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import hashlib
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
 
-SCHEMA_VERSION = 2
+import numpy as np
+
+from .embed import EMBEDDING_DIM, EMBEDDING_MODEL, get_embedder
+
+SCHEMA_VERSION = 3
+# bge-small scores unrelated text ~0.45-0.59 and real matches ~0.65+ (measured on the live memories).
+MIN_COSINE = 0.6
 
 
 # Version 1 schema, kept verbatim: later versions migrate from it additively.
@@ -102,6 +109,8 @@ def migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
     if version < 2:
         _migrate_v2(conn)
+    if version < 3:
+        _migrate_v3(conn)
 
 
 _V2_STATEMENTS = (
@@ -142,6 +151,32 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         raise
 
 
+_V3_STATEMENTS = (
+    """CREATE TABLE memory_embeddings (
+      memory_id INTEGER PRIMARY KEY REFERENCES memories(id) ON DELETE CASCADE,
+      model TEXT NOT NULL, dim INTEGER NOT NULL, content_hash TEXT NOT NULL, vec BLOB NOT NULL
+    )""",
+    """CREATE TRIGGER memories_embeddings_ad AFTER DELETE ON memories BEGIN
+      DELETE FROM memory_embeddings WHERE memory_id=old.id;
+    END""",
+)
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    """v2 -> v3.  Embeddings are deliberately independent of the foreign_keys pragma."""
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 3:
+            for statement in _V3_STATEMENTS:
+                conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=3")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def parse_ts(value) -> datetime | None:
     """Parse the mixed timestamp formats found in logs (ISO with Z/offset/space, or unix epoch) to aware UTC."""
     if value is None or value == "":
@@ -166,6 +201,131 @@ def iso(value) -> str | None:
 def fts_query(text: str) -> str:
     """Turn free text into a safe FTS5 query: quoted word tokens joined by OR (bm25 ranks multi-term hits first)."""
     return " OR ".join(f'"{token}"' for token in re.findall(r"\w+", text))
+
+
+def embedding_text(title: str, content: str, tags: str) -> str:
+    return f"{title}\n{content}\n{tags}"
+
+
+def embedding_hash(title: str, content: str, tags: str, model: str = EMBEDDING_MODEL) -> str:
+    return hashlib.sha256((embedding_text(title, content, tags) + model).encode()).hexdigest()
+
+
+def _normalise(vectors: np.ndarray) -> np.ndarray | None:
+    vectors = np.asarray(vectors, dtype=np.float32)
+    if vectors.ndim != 2 or vectors.shape[1] != EMBEDDING_DIM:
+        return None
+    lengths = np.linalg.norm(vectors, axis=1)
+    if np.any(lengths == 0):
+        return None
+    return vectors / lengths[:, None]
+
+
+def ensure_embeddings(conn: sqlite3.Connection, limit: int = 200) -> dict[str, int]:
+    """Fill at most ``limit`` stale rows.  Failure is intentionally silent to callers."""
+    if os.environ.get("DEVMEM_EMBED") == "0":
+        return {"embedded": 0, "pending": 0}
+    rows = conn.execute("""SELECT m.id,m.title,m.content,m.tags,e.model,e.content_hash,e.dim
+        FROM memories m LEFT JOIN memory_embeddings e ON e.memory_id=m.id ORDER BY m.id""").fetchall()
+    all_stale = [row for row in rows if row["model"] != EMBEDDING_MODEL or row["dim"] != EMBEDDING_DIM
+                 or row["content_hash"] != embedding_hash(row["title"], row["content"], row["tags"])]
+    stale = all_stale[:max(0, limit)]
+    if not stale:
+        return {"embedded": 0, "pending": 0}
+    try:
+        vectors = get_embedder().embed(
+            [embedding_text(row["title"], row["content"], row["tags"]) for row in stale]
+        )
+        normalised = _normalise(vectors) if vectors is not None else None
+    except Exception:
+        normalised = None
+    if normalised is None:
+        return {"embedded": 0, "pending": len(all_stale)}
+    for row, vector in zip(stale, normalised, strict=True):
+        conn.execute("""INSERT INTO memory_embeddings(memory_id,model,dim,content_hash,vec) VALUES(?,?,?,?,?)
+            ON CONFLICT(memory_id) DO UPDATE SET model=excluded.model,dim=excluded.dim,
+            content_hash=excluded.content_hash,vec=excluded.vec""",
+            (row["id"], EMBEDDING_MODEL, EMBEDDING_DIM,
+             embedding_hash(row["title"], row["content"], row["tags"]), vector.astype("<f4").tobytes()))
+    return {"embedded": len(stale), "pending": len(all_stale) - len(stale)}
+
+
+def _bm25_candidates(conn: sqlite3.Connection, query: str, where_sql: str, params: tuple, kind: str | None) -> list[dict]:
+    match = fts_query(query)
+    if not match:
+        return []
+    clauses, values = [f"({where_sql})", "memories_fts MATCH ?"], list(params) + [match]
+    if kind:
+        clauses.append("m.kind=?")
+        values.append(kind)
+    rows = conn.execute(f"""SELECT m.id,m.title,m.kind,m.project,m.updated_at,
+        snippet(memories_fts,1,'<b>','</b>','…',18) snippet
+        FROM memories_fts JOIN memories m ON m.id=memories_fts.rowid
+        WHERE {' AND '.join(clauses)} ORDER BY bm25(memories_fts) LIMIT 50""", values).fetchall()
+    return [dict(row) for row in rows]
+
+
+def hybrid_search(conn: sqlite3.Connection, query: str, *, where_sql: str, params: tuple = (),
+                  kind: str | None = None, limit: int = 8) -> list[dict]:
+    """Fuse FTS and local-vector rankings using Reciprocal Rank Fusion (k=60)."""
+    keyword = _bm25_candidates(conn, query, where_sql, params, kind)
+    if not fts_query(query):
+        return keyword[:limit]
+    if os.environ.get("DEVMEM_EMBED") == "0":
+        return keyword[:limit]
+
+    # This may populate stale rows and may load the local model.  Both are best-effort.
+    ensure_embeddings(conn)
+    try:
+        query_vector = get_embedder().embed([query], query=True)
+        normalised_query = _normalise(query_vector) if query_vector is not None else None
+    except Exception:
+        normalised_query = None
+    if normalised_query is None:
+        return keyword[:limit]
+
+    clauses, values = [f"({where_sql})", "e.model=?", "e.dim=?"], list(params) + [EMBEDDING_MODEL, EMBEDDING_DIM]
+    if kind:
+        clauses.append("m.kind=?")
+        values.append(kind)
+    rows = conn.execute(f"""SELECT m.id,m.title,m.kind,m.project,m.updated_at,m.content,e.vec
+        FROM memories m JOIN memory_embeddings e ON e.memory_id=m.id
+        WHERE {' AND '.join(clauses)}""", values).fetchall()
+    semantic: list[dict] = []
+    q = normalised_query[0]
+    for row in rows:
+        vector = np.frombuffer(row["vec"], dtype="<f4")
+        if vector.size != EMBEDDING_DIM:
+            continue
+        cosine = float(np.dot(q, vector))
+        if cosine >= MIN_COSINE:
+            item = dict(row)
+            item["snippet"] = item.pop("content")[:160]
+            item.pop("vec")
+            item["cosine"] = cosine
+            semantic.append(item)
+    semantic.sort(key=lambda row: (-row["cosine"], row["id"]))
+    semantic = semantic[:50]
+
+    merged: dict[int, dict] = {}
+    for rank, row in enumerate(keyword, 1):
+        merged[row["id"]] = {**row, "_score": 1 / (60 + rank), "_keyword": True, "_semantic": False}
+    for rank, row in enumerate(semantic, 1):
+        current = merged.get(row["id"])
+        if current is None:
+            merged[row["id"]] = {**row, "_score": 1 / (60 + rank), "_keyword": False, "_semantic": True}
+        else:
+            current["_score"] += 1 / (60 + rank)
+            current["_semantic"] = True
+    ordered = sorted(merged.values(), key=lambda row: (-row["_score"], row["id"]))[:limit]
+    out = []
+    for row in ordered:
+        keyword_match, semantic_match = row.pop("_keyword"), row.pop("_semantic")
+        row.pop("_score")
+        row.pop("cosine", None)
+        row["match"] = "both" if keyword_match and semantic_match else "keyword" if keyword_match else "semantic"
+        out.append(row)
+    return out
 
 
 @lru_cache(maxsize=1024)

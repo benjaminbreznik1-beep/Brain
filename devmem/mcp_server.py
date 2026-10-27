@@ -9,7 +9,7 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .db import connection, fts_query, now, project_for_cwd
+from .db import connection, hybrid_search, now, project_for_cwd
 
 mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; save durable decisions, preferences, and hard-won gotchas. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
@@ -77,13 +77,9 @@ def memory_save(content: str, title: str | None = None, kind: str = "note", tags
 def memory_search(query: str, limit: int = 8, kind: str | None = None, scope: str = "project", ctx: Context | None = None) -> list[dict]:
     def work():
         _, project = _client(); where, params = _scope(scope, project)
-        match = fts_query(query)
-        if not match: return []
-        clauses, values = [where, "memories_fts MATCH ?"], list(params) + [match]
-        if kind: clauses.append("m.kind=?"); values.append(kind)
         with connection() as conn:
-            rows = conn.execute(f"SELECT m.id,m.title,m.kind,m.project,m.updated_at, snippet(memories_fts,1,'<b>','</b>','…',18) snippet FROM memories_fts JOIN memories m ON m.id=memories_fts.rowid WHERE {' AND '.join(clauses)} ORDER BY bm25(memories_fts) LIMIT ?", (*values, max(1,min(limit,50)))).fetchall()
-            return [dict(r) for r in rows]
+            return hybrid_search(conn, query, where_sql=where, params=params, kind=kind,
+                                 limit=max(1, min(limit, 50)))
     return _call("memory_search", {"query": query, "limit": limit, "kind": kind, "scope": scope}, work, ctx)
 
 

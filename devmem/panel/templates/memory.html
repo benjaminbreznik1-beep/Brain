@@ -40,6 +40,7 @@
 <details class="card">
   <summary>
     <span class="badge kind-{{ x.kind }}">{{ x.kind }}</span>
+    {% if x.match %}<span class="badge">{{ x.match }}</span>{% endif %}
     {{ x.title }}
     <span class="muted"> · {{ x.project or 'global' }} · <time data-rel datetime="{{ x.updated_at }}">{{ x.updated_at }}</time></span>
   </summary>
