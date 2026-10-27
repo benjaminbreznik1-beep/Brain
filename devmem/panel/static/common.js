@@ -77,4 +77,61 @@
     el.title = el.getAttribute("data-tokens");
     el.textContent = fmtTokens(el.getAttribute("data-tokens"));
   });
+
+  var adoLink = document.querySelector('a[href="/ado"]');
+  var adoBadge = adoLink && adoLink.querySelector(".ado-change-badge");
+  var adoChanges = document.getElementById("ado-changes");
+
+  // Stored as "<journal_id>:<seq>"; a seq from an earlier panel run (other journal_id) counts as nothing seen.
+  function seenAdoSeq(journalId) {
+    try {
+      var match = /^([0-9a-f]+):(\d+)$/.exec(localStorage.getItem("devmem.ado.seen") || "");
+      return match && match[1] === journalId ? Number(match[2]) : 0;
+    } catch (_) { return 0; }
+  }
+
+  function setSeenAdoSeq(journalId, seq) {
+    try { localStorage.setItem("devmem.ado.seen", journalId + ":" + seq); } catch (_) {}
+  }
+
+  function showAdoChanges(changes) {
+    if (!adoChanges) return;
+    adoChanges.textContent = "";
+    if (!changes.length) { adoChanges.hidden = true; return; }
+    var heading = document.createElement("strong");
+    heading.textContent = "Changed since you last looked";
+    var list = document.createElement("ul");
+    changes.forEach(function (change) {
+      var item = document.createElement("li"), text = document.createElement("span"), at = document.createElement("time");
+      text.textContent = change.text;
+      at.setAttribute("datetime", change.at);
+      at.setAttribute("data-rel", "");
+      at.title = change.at;
+      at.textContent = relTime(change.at);
+      item.append(text, at); list.appendChild(item);
+    });
+    adoChanges.append(heading, list); adoChanges.hidden = false;
+  }
+
+  // On the ADO page the box keeps what was unseen when the page opened, plus anything newer.
+  var adoPageSince = null;
+
+  function refreshAdoChanges() {
+    fetch("/api/ado/changes").then(function (response) {
+      if (!response.ok) throw new Error("ADO changes failed");
+      return response.json();
+    }).then(function (data) {
+      var seen = seenAdoSeq(data.journal_id), latest = data.latest_seq || 0;
+      if (adoBadge) adoBadge.hidden = !(latest > seen);
+      if (adoChanges) {
+        if (adoPageSince === null) adoPageSince = seen;
+        showAdoChanges((data.changes || []).filter(function (change) { return change.seq > adoPageSince; }));
+        setSeenAdoSeq(data.journal_id, latest);
+        if (adoBadge) adoBadge.hidden = true;
+      }
+    }).catch(function () {});
+  }
+
+  refreshAdoChanges();
+  setInterval(refreshAdoChanges, 30000);
 })();

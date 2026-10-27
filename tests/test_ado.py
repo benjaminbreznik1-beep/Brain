@@ -189,6 +189,120 @@ def test_ado_cache_preserves_last_good_value_and_pulses_only_later_additions():
     assert pulses == [{"type": "ado", "id": 2}]
 
 
+def test_ado_changes_ignore_initial_and_identical_snapshots():
+    from devmem.panel.app import AdoCache
+    snapshot = {**empty_snapshot(True), "open_tasks": [{"id": 1, "title": "Task", "state": "New"}]}
+    class Client:
+        configured = lambda self: True
+        def snapshot(self): return snapshot
+    cache = AdoCache(Client())
+    cache.refresh()
+    cache.refresh()
+    assert cache.get_changes() == (0, [])
+
+
+def test_ado_changes_describe_task_additions_states_and_removals():
+    from devmem.panel.app import AdoCache
+    first = {**empty_snapshot(True), "open_tasks": [{"id": 1, "title": "Old", "state": "New"},
+             {"id": 2, "title": "Gone", "state": "Active"}]}
+    second = {**empty_snapshot(True), "open_tasks": [{"id": 1, "title": "Old", "state": "Closed"},
+              {"id": 3, "title": "New", "state": "Active"}]}
+    class Client:
+        configured = lambda self: True
+        values = [first, second]
+        def snapshot(self): return self.values.pop(0)
+    cache = AdoCache(Client())
+    cache.refresh(); cache.refresh()
+    assert [change["text"] for change in reversed(cache.get_changes()[1])] == [
+        "Task #1 Old: New → Closed", "Task #3 New: new, Active", "Task #2 Gone: no longer open"]
+
+
+def test_ado_changes_describe_pr_lists_and_pending_reviewers():
+    from devmem.panel.app import AdoCache
+    first = {**empty_snapshot(True), "to_review": [{"id": 1, "title": "Review"}],
+             "my_waiting_on_others": [{"id": 2, "title": "Wait", "pending_reviewers": ["Ada"]}],
+             "my_changes_requested": [{"id": 3, "title": "Gone"}]}
+    second = {**empty_snapshot(True), "to_review": [{"id": 4, "title": "New review"}],
+              "my_approved_not_completed": [{"id": 1, "title": "Review"}],
+              "my_waiting_on_others": [{"id": 2, "title": "Wait", "pending_reviewers": ["Bea"]}]}
+    class Client:
+        configured = lambda self: True
+        values = [first, second]
+        def snapshot(self): return self.values.pop(0)
+    cache = AdoCache(Client())
+    cache.refresh(); cache.refresh()
+    assert [change["text"] for change in reversed(cache.get_changes()[1])] == [
+        "PR !4 New review: now in to review", "PR !1 Review: now in approved, not completed", "PR !2 Wait: pending reviewers now Bea",
+        "PR !3 Gone: no longer listed"]
+
+
+def test_ado_changes_keep_earlier_records_after_a_failed_refresh():
+    from devmem.panel.app import AdoCache
+    first = {**empty_snapshot(True), "open_tasks": []}
+    second = {**empty_snapshot(True), "open_tasks": [{"id": 1, "title": "Task", "state": "New"}]}
+    class Client:
+        configured = lambda self: True
+        values = [first, second, AdoError("bad")]
+        def snapshot(self):
+            value = self.values.pop(0)
+            if isinstance(value, Exception): raise value
+            return value
+    cache = AdoCache(Client())
+    cache.refresh(); cache.refresh()
+    before = cache.get_changes()
+    cache.refresh()
+    assert cache.get_changes() == before
+
+
+def test_ado_changes_are_capped_and_keep_increasing_sequence_numbers():
+    from devmem.panel.app import AdoCache
+    values = [{**empty_snapshot(True), "open_tasks": [{"id": 1, "title": "Task", "state": "0"}]}]
+    values.extend({**empty_snapshot(True), "open_tasks": [{"id": 1, "title": "Task", "state": str(number)}]}
+                  for number in range(1, 106))
+    class Client:
+        configured = lambda self: True
+        def snapshot(self): return values.pop(0)
+    cache = AdoCache(Client())
+    for _ in range(106): cache.refresh()
+    latest, changes = cache.get_changes()
+    assert latest == 105 and len(changes) == 100
+    assert changes[0]["seq"] == 105 and changes[-1]["seq"] == 6
+
+
+def test_ado_changes_api_reads_only_the_cache_and_filters_since(tmp_path, monkeypatch):
+    from devmem.panel import app as panel
+    class Client:
+        def __init__(self): self.calls = 0
+        def configured(self): return True
+        def snapshot(self): self.calls += 1; return empty_snapshot(True)
+    source = Client(); cache = panel.AdoCache(source)
+    cache.change_seq = 2
+    cache.changes = [{"seq": 1, "at": "2026-01-01T00:00:00Z", "text": "first"},
+                     {"seq": 2, "at": "2026-01-01T00:01:00Z", "text": "second"}]
+    monkeypatch.setattr(panel, "_ado_cache", cache)
+    monkeypatch.setenv("DEVMEM_DB", str(tmp_path / "panel.db"))
+    client = TestClient(panel.app, base_url="http://127.0.0.1")
+    assert client.get("/api/ado/changes").json() == {"journal_id": cache.journal_id, "latest_seq": 2, "changes": list(reversed(cache.changes))}
+    assert client.get("/api/ado/changes?since=1").json() == {"journal_id": cache.journal_id, "latest_seq": 2, "changes": [cache.changes[1]]}
+    cache.changes = []; cache.change_seq = 0
+    assert client.get("/api/ado/changes").json() == {"journal_id": cache.journal_id, "latest_seq": 0, "changes": []}
+    assert source.calls == 0
+    assert panel.AdoCache(source).journal_id != cache.journal_id  # a new panel run gets a new journal
+
+
+def test_pages_include_the_ado_nav_link_and_changes_container(tmp_path, monkeypatch):
+    from devmem.panel import app as panel
+    monkeypatch.setenv("DEVMEM_DB", str(tmp_path / "panel.db"))
+    class Client:
+        def configured(self): return False
+    cache = panel.AdoCache(Client())
+    monkeypatch.setattr(panel, "_ado_cache", cache)
+    client = TestClient(panel.app, base_url="http://127.0.0.1")
+    overview, ado_page = client.get("/overview").text, client.get("/ado").text
+    assert 'href="/ado"' in overview and 'href="/ado"' in ado_page
+    assert 'id="ado-changes"' in ado_page
+
+
 def test_not_configured_makes_zero_requests(monkeypatch):
     opener = _Opener()
     monkeypatch.setattr(ado, "_OPENER", opener)

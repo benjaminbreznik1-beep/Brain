@@ -4,9 +4,11 @@ import asyncio
 import copy
 import json
 import logging
+import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
@@ -91,6 +93,10 @@ class AdoCache:
         self.lock = threading.Lock()
         self.value: dict | None = None
         self.had_successful_refresh = False
+        self.changes: list[dict] = []
+        self.change_seq = 0
+        # The journal lives in memory; a new id per panel run tells browsers their seen seq is from an older run.
+        self.journal_id = secrets.token_hex(4)
 
     @staticmethod
     def _waiting_ids(snapshot: dict | None) -> set[int | str]:
@@ -98,6 +104,43 @@ class AdoCache:
             return set()
         names = ("to_review", "my_approved_not_completed", "my_changes_requested")
         return {pr["id"] for name in names for pr in snapshot.get(name, []) if pr.get("id") is not None}
+
+    @staticmethod
+    def _by_id(snapshot: dict, name: str) -> dict[int | str, dict]:
+        return {item["id"]: item for item in snapshot.get(name, []) if item.get("id") is not None}
+
+    @classmethod
+    def _changes(cls, old: dict, fresh: dict) -> list[str]:
+        changes = []
+        old_tasks, new_tasks = cls._by_id(old, "open_tasks"), cls._by_id(fresh, "open_tasks")
+        for task_id, task in new_tasks.items():
+            if task_id not in old_tasks:
+                changes.append(f"Task #{task_id} {task.get('title') or 'Untitled work item'}: new, {task.get('state') or ''}")
+            elif task.get("state") != old_tasks[task_id].get("state"):
+                changes.append(f"Task #{task_id} {task.get('title') or 'Untitled work item'}: {old_tasks[task_id].get('state') or ''} → {task.get('state') or ''}")
+        for task_id, task in old_tasks.items():
+            if task_id not in new_tasks:
+                changes.append(f"Task #{task_id} {task.get('title') or 'Untitled work item'}: no longer open")
+
+        labels = {"to_review": "to review", "my_approved_not_completed": "approved, not completed",
+                  "my_changes_requested": "changes requested", "my_waiting_on_others": "waiting on others"}
+        old_prs = {pr_id: (name, pr) for name in labels for pr_id, pr in cls._by_id(old, name).items()}
+        new_prs = {pr_id: (name, pr) for name in labels for pr_id, pr in cls._by_id(fresh, name).items()}
+        for pr_id, (name, pr) in new_prs.items():
+            old_item = old_prs.get(pr_id)
+            if old_item is None or old_item[0] != name:
+                changes.append(f"PR !{pr_id} {pr.get('title') or 'Untitled pull request'}: now in {labels[name]}")
+            if name == "my_waiting_on_others" and old_item and old_item[0] == name and set(pr.get("pending_reviewers", [])) != set(old_item[1].get("pending_reviewers", [])):
+                reviewers = pr.get("pending_reviewers", [])
+                changes.append(f"PR !{pr_id} {pr.get('title') or 'Untitled pull request'}: pending reviewers now {', '.join(reviewers) if reviewers else 'none'}")
+        for pr_id, (_, pr) in old_prs.items():
+            if pr_id not in new_prs:
+                changes.append(f"PR !{pr_id} {pr.get('title') or 'Untitled pull request'}: no longer listed")
+        return changes
+
+    def get_changes(self, since: int = 0) -> tuple[int, list[dict]]:
+        with self.lock:
+            return self.change_seq, [copy.deepcopy(change) for change in reversed(self.changes) if change["seq"] > since]
 
     def get(self) -> dict:
         with self.lock:
@@ -132,9 +175,16 @@ class AdoCache:
 
         with self.lock:
             had_successful_refresh = self.had_successful_refresh
+            previous = self.value
             old_ids = self._waiting_ids(self.value)
             self.value = fresh
             self.had_successful_refresh = True
+            if had_successful_refresh and previous is not None:
+                at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+                for text in self._changes(previous, fresh):
+                    self.change_seq += 1
+                    self.changes.append({"seq": self.change_seq, "at": at, "text": text})
+                self.changes = self.changes[-100:]
             added = self._waiting_ids(fresh) - old_ids if had_successful_refresh else set()
             result = copy.deepcopy(fresh)
         # Initial data does not create a synthetic alert; later refreshes do.
@@ -281,6 +331,12 @@ def ado_refresh():
 @app.get("/api/ado")
 def api_ado():
     return JSONResponse(_ado_cache.get())
+
+
+@app.get("/api/ado/changes")
+def api_ado_changes(since: int = 0):
+    latest_seq, changes = _ado_cache.get_changes(max(0, since))
+    return {"journal_id": _ado_cache.journal_id, "latest_seq": latest_seq, "changes": changes}
 
 
 @app.get("/overview")

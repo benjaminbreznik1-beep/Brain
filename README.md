@@ -43,7 +43,7 @@ Updates and deletes retain a revision history; use `memory_history` to inspect i
 
 ## Azure DevOps
 
-ADO is optional and read-only. Create a PAT with **Work Items: Read** and **Code: Read**, store it in `~/.devmem/ado_token`, then run `chmod 600 ~/.devmem/ado_token`. The organization and project are currently hard-coded as `example-org` and `ExampleProject`. When the token exists, the running panel polls ADO every 5 minutes. MCP clients can call `ado_status`; it reads the panel cache, so the panel must be running (set `DEVMEM_PANEL_PORT` if it is not on the default port).
+ADO is optional and read-only. Create a PAT with **Work Items: Read** and **Code: Read**, store it in `~/.devmem/ado_token`, then run `chmod 600 ~/.devmem/ado_token`. The organization and project are currently hard-coded as `example-org` and `ExampleProject`. When the token exists, the running panel polls ADO every 5 minutes. MCP clients can call `ado_status`; it reads the panel cache, so the panel must be running (set `DEVMEM_PANEL_PORT` if it is not on the default port). The ADO tab shows a `!` for changes since it was last opened; `GET /api/ado/changes` exposes the in-memory change journal.
 
 ## Network use
 

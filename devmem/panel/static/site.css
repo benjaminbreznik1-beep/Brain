@@ -195,6 +195,11 @@ details > summary { cursor: pointer; }
 .ado-reviewers { color: var(--muted); font-size: 0.88rem; }
 .ado-reviewers b { color: var(--text); font-weight: 600; }
 .ado-tasks h3 { margin-top: 0; }
+.ado-change-badge { color: var(--amber); font-size: 0.75rem; font-weight: 700; margin-left: 0.15rem; }
+.ado-changes { border-color: rgba(251, 191, 36, 0.35); }
+.ado-changes ul { list-style: none; margin: 0.45rem 0 0; padding: 0; }
+.ado-changes li { display: flex; gap: 0.7rem; justify-content: space-between; border-top: 1px solid var(--line); padding: 0.35rem 0; }
+.ado-changes time { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
 
 /* ---------- small screens ---------- */
 @media (max-width: 720px) {
