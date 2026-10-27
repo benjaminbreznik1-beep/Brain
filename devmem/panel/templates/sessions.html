@@ -1,6 +1,9 @@
 {% extends 'base.html' %}
 {% block title %}Sessions · devmem{% endblock %}
 {% block body %}
+<style>
+  tr.day th { color: var(--text, #e5e7eb); background: rgba(196, 181, 253, 0.08); text-transform: none; letter-spacing: 0; font-size: 0.85rem; padding-top: 1rem; }
+</style>
 <h1>Sessions</h1>
 <table>
   <thead>
@@ -8,11 +11,11 @@
   </thead>
   <tbody>
   {% for x in rows %}
-    <tr>
+    <tr data-start="{{ x.start }}" data-end="{{ x.end }}" data-input="{{ x.input or 0 }}" data-output="{{ x.output or 0 }}" data-cache="{{ x.cache or 0 }}" data-agent="{{ x.agent }}">
       <td><span class="badge {{ x.agent }}">{{ x.agent }}</span></td>
       <td class="mono">{{ x.project }}</td>
       <td class="muted">{{ x.model }}</td>
-      <td><a href="/sessions/{{ x.session_id }}">{{ x.start }} → {{ x.end }}</a></td>
+      <td><a class="span" href="/sessions/{{ x.session_id }}">{{ x.start }} → {{ x.end }}</a></td>
       <td class="num">{{ x.turns }}</td>
       <td class="num"><span data-tokens="{{ x.input }}">{{ x.input }}</span> /
         <span data-tokens="{{ x.output }}">{{ x.output }}</span> /
@@ -21,4 +24,47 @@
   {% endfor %}
   </tbody>
 </table>
+{% endblock %}
+{% block scripts %}
+<script>
+  // split rows into local-time days (by last activity), show local HH:MM and per-day token totals
+  (function () {
+    var tbody = document.querySelector("tbody"), header = null, sum = null;
+    var today = new Date().toDateString(), yday = new Date(Date.now() - 864e5).toDateString();
+    function hm(d) { return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+    function closeDay() {
+      if (!header) return;
+      var cell = header.lastChild, total = sum.input + sum.output + sum.cache;
+      var parts = Object.keys(sum.agents).sort(function (a, b) { return sum.agents[b] - sum.agents[a]; })
+        .map(function (a) { return a + " " + devmem.fmtTokens(sum.agents[a]); });
+      cell.textContent = devmem.fmtTokens(total) + " tokens" + (parts.length ? " · " + parts.join(" · ") : "");
+      cell.title = "input " + sum.input + " / output " + sum.output + " / cache " + sum.cache;
+    }
+    Array.prototype.slice.call(tbody.rows).forEach(function (tr) {
+      var s = new Date(tr.dataset.start), e = new Date(tr.dataset.end);
+      if (isNaN(e)) return;
+      var day = e.toDateString();
+      if (!header || day !== header.dataset.day) {
+        closeDay();
+        var label = day === today ? "Today" : day === yday ? "Yesterday" : "";
+        var date = e.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+        header = document.createElement("tr");
+        header.className = "day";
+        header.dataset.day = day;
+        header.innerHTML = '<th colspan="4"></th><th class="num" colspan="2"></th>';
+        header.firstChild.textContent = label ? label + " · " + date : date;
+        tbody.insertBefore(header, tr);
+        sum = { input: 0, output: 0, cache: 0, agents: {} };
+      }
+      sum.input += +tr.dataset.input || 0;
+      sum.output += +tr.dataset.output || 0;
+      sum.cache += +tr.dataset.cache || 0;
+      var agent = tr.dataset.agent || "other";
+      sum.agents[agent] = (sum.agents[agent] || 0) + (+tr.dataset.input || 0) + (+tr.dataset.output || 0) + (+tr.dataset.cache || 0);
+      var startTxt = isNaN(s) ? "?" : (s.toDateString() === day ? "" : s.toLocaleDateString([], { day: "numeric", month: "short" }) + " ") + hm(s);
+      tr.querySelector("a.span").textContent = startTxt + " → " + hm(e);
+    });
+    closeDay();
+  })();
+</script>
 {% endblock %}
