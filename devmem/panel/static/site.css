@@ -178,6 +178,24 @@ details > summary { cursor: pointer; }
 
 .pill-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.5rem 0 1rem; }
 
+/* ---------- Azure DevOps ---------- */
+.page-title-row, .ado-refresh { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+.page-title-row { justify-content: space-between; }
+.page-title-row h1 { margin-bottom: 0.1rem; }
+.page-title-row p { margin: 0 0 1rem; }
+.ado-refresh form { margin: 0; }
+.ado-stale, .ado-error { color: var(--amber); }
+.ado-error { font-size: 0.85rem; }
+.ado-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.9rem; }
+.ado-grid .card { margin: 0; }
+.ado-list { list-style: none; margin: 0; padding: 0; }
+.ado-list li { border-bottom: 1px solid var(--line); padding: 0.65rem 0; display: grid; gap: 0.18rem; }
+.ado-list li:last-child { border-bottom: 0; padding-bottom: 0; }
+.ado-list a { font-weight: 600; }
+.ado-reviewers { color: var(--muted); font-size: 0.88rem; }
+.ado-reviewers b { color: var(--text); font-weight: 600; }
+.ado-tasks h3 { margin-top: 0; }
+
 /* ---------- small screens ---------- */
 @media (max-width: 720px) {
   .topbar { flex-wrap: wrap; gap: 0.6rem; }

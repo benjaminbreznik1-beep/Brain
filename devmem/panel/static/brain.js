@@ -163,6 +163,27 @@
     }).join("");
   }
 
+  // ------------------------------------------------------------------ Azure DevOps card (the server only returns cached data here)
+
+  function renderAdoCard(snapshot) {
+    var card = $("ado-card");
+    if (!snapshot || !snapshot.configured) { card.hidden = true; return; }
+    card.hidden = false;
+    var count = function (name) { return (snapshot[name] || []).length; };
+    $("ado-counts").innerHTML =
+      '<span><b>' + count("to_review") + '</b> to review</span>' +
+      '<span><b>' + count("my_approved_not_completed") + '</b> approved</span>' +
+      '<span><b>' + count("my_changes_requested") + '</b> changes</span>' +
+      '<span><b>' + count("my_waiting_on_others") + '</b> waiting</span>' +
+      '<span><b>' + count("open_tasks") + '</b> tasks</span>';
+  }
+
+  function refreshAdoCard() {
+    fetch("/api/ado").then(function (response) {
+      return response.ok ? response.json() : null;
+    }).then(renderAdoCard).catch(function () { /* the live wall remains usable */ });
+  }
+
   // ------------------------------------------------------------------ tokens
 
   function splitHtml(map) {
@@ -563,6 +584,12 @@
       if (!G) return;
       var hub = nodeById.__brain__, project = p.project ? nodeById["p:" + p.project] : null;
       var agent = findAgent(p), now = performance.now();
+      if (p.type === "ado") {
+        if (hub) flashes[hub.id] = now;
+        dirty = true;
+        kick();
+        return;
+      }
       if (p.type === "memory") {
         if (agent) agent.lit = now;
         if (!REDUCED && agent && hub) impulses.push({ path: curvePoints(agent, hub), start: now, dur: 900, color: agent.color, small: false, project: null, targets: [] });
@@ -966,7 +993,11 @@
     });
     es.addEventListener("pulse", function (e) {
       lastMessage = Date.now();
-      try { JSON.parse(e.data).forEach(Brain.pulse); } catch (err) { console.error(err); }
+      try {
+        var pulses = JSON.parse(e.data);
+        pulses.forEach(Brain.pulse);
+        if (pulses.some(function (pulse) { return pulse.type === "ado"; })) refreshAdoCard();
+      } catch (err) { console.error(err); }
     });
     es.onerror = function () {
       setStatus("offline", "offline · reconnecting");
@@ -976,6 +1007,9 @@
       }
     };
   }
+
+  refreshAdoCard();
+  setInterval(refreshAdoCard, 30000);
 
   // Watchdog: a half-open connection (laptop sleep, server restart) sends nothing; reconnect it.
   setInterval(function () {

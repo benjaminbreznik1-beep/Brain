@@ -356,6 +356,10 @@
       if (!ready) return;
       var hub = nodeById.__brain__, project = p.project ? nodeById["p:" + p.project] : null;
       var agent = findAgent(p), now = performance.now();
+      if (p.type === "ado") {
+        flash(hub, 1600);
+        return;
+      }
       if (p.type === "memory") {
         if (agent) flash(agent, 900);
         var memoryLink = agent && hub && linkByKey[agent.id + ">" + hub.id];

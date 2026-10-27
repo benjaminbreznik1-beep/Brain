@@ -1,0 +1,34 @@
+[
+  {
+    "pullRequestId": 101,
+    "title": "Needs my review",
+    "repository": {"name": "demo-repo"},
+    "creationDate": "2026-10-26T08:00:00Z",
+    "createdBy": {"id": "another-user"},
+    "reviewers": [{"id": "me-id", "displayName": "Me", "vote": 0}]
+  },
+  {
+    "pullRequestId": 102,
+    "title": "Requested changes",
+    "repository": {"name": "demo-repo"},
+    "creationDate": "2026-10-25T08:00:00Z",
+    "createdBy": {"id": "me-id"},
+    "reviewers": [{"id": "reviewer-a", "displayName": "Reviewer A", "vote": -5}]
+  },
+  {
+    "pullRequestId": 16054,
+    "title": "Approved but not completed",
+    "repository": {"name": "demo-repo"},
+    "creationDate": "2026-10-24T08:00:00Z",
+    "createdBy": {"id": "me-id"},
+    "reviewers": [{"id": "reviewer-b", "displayName": "Reviewer B", "vote": 10}]
+  },
+  {
+    "pullRequestId": 104,
+    "title": "Waiting for review",
+    "repository": {"name": "demo-repo"},
+    "creationDate": "2026-10-23T08:00:00Z",
+    "createdBy": {"id": "me-id"},
+    "reviewers": [{"id": "reviewer-c", "displayName": "Reviewer C", "vote": 0}]
+  }
+]

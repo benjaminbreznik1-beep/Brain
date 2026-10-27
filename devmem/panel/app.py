@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import threading
@@ -9,12 +10,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ..db import connection, fts_query, now
 from ..ingest.runner import ingest_all
+from ..ado import AdoClient, AdoError, empty_snapshot
 from . import state as live
 
 HERE = Path(__file__).parent
@@ -24,6 +26,7 @@ log = logging.getLogger("devmem.panel")
 INGEST_EVERY_S = 5
 STREAM_EVERY_S = 2.5
 STATE_TTL_S = 2.0
+ADO_REFRESH_S = 5 * 60
 
 
 def _rows(sql, params=()):
@@ -38,6 +41,89 @@ def _ingest_loop(stop: threading.Event):
         except Exception:  # dashboard remains usable if one log is malformed/unreadable
             log.exception("ingest pass failed")
         if stop.wait(INGEST_EVERY_S):
+            return
+
+
+class AdoPulseQueue:
+    """Small in-process cursor for ADO refresh notifications on the shared SSE stream."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.cursor = 0
+        self.events: list[tuple[int, dict]] = []
+
+    def emit(self, event: dict):
+        with self.lock:
+            self.cursor += 1
+            self.events.append((self.cursor, event))
+            self.events = self.events[-100:]
+
+    def since(self, cursor: int) -> tuple[list[dict], int]:
+        with self.lock:
+            return [event for number, event in self.events if number > cursor], self.cursor
+
+
+class AdoCache:
+    """Last-good snapshot cache; failures never replace useful ADO data."""
+
+    def __init__(self, client: AdoClient | None = None, on_waiting_added=None):
+        self.client = client or AdoClient()
+        self.on_waiting_added = on_waiting_added
+        self.lock = threading.Lock()
+        self.value: dict | None = None
+
+    @staticmethod
+    def _waiting_ids(snapshot: dict | None) -> set[int | str]:
+        if not snapshot:
+            return set()
+        names = ("to_review", "my_approved_not_completed", "my_changes_requested")
+        return {pr["id"] for name in names for pr in snapshot.get(name, []) if pr.get("id") is not None}
+
+    def get(self) -> dict:
+        with self.lock:
+            return copy.deepcopy(self.value) if self.value is not None else empty_snapshot()
+
+    def refresh(self) -> dict:
+        try:
+            fresh = self.client.snapshot()
+        except AdoError:
+            # The client intentionally exposes only credential-safe messages.
+            with self.lock:
+                previous = copy.deepcopy(self.value) if self.value is not None else empty_snapshot(configured=True)
+                previous["stale"] = True
+                previous["error"] = "Azure DevOps refresh failed"
+                self.value = previous
+                return copy.deepcopy(previous)
+        except Exception:
+            # Same safety rule for an unexpected local parsing failure.
+            with self.lock:
+                previous = copy.deepcopy(self.value) if self.value is not None else empty_snapshot(configured=True)
+                previous["stale"] = True
+                previous["error"] = "Azure DevOps refresh failed"
+                self.value = previous
+                return copy.deepcopy(previous)
+
+        with self.lock:
+            had_previous = self.value is not None
+            old_ids = self._waiting_ids(self.value)
+            self.value = fresh
+            added = self._waiting_ids(fresh) - old_ids if had_previous else set()
+            result = copy.deepcopy(fresh)
+        # Initial data does not create a synthetic alert; later refreshes do.
+        if added and self.on_waiting_added:
+            for pr_id in added:
+                self.on_waiting_added({"type": "ado", "id": pr_id})
+        return result
+
+
+_ado_pulses = AdoPulseQueue()
+_ado_cache = AdoCache(on_waiting_added=_ado_pulses.emit)
+
+
+def _ado_loop(stop: threading.Event):
+    while True:
+        _ado_cache.refresh()
+        if stop.wait(ADO_REFRESH_S):
             return
 
 
@@ -65,12 +151,15 @@ _cache = StateCache()
 async def lifespan(app: FastAPI):
     stop = threading.Event()
     thread = threading.Thread(target=_ingest_loop, args=(stop,), daemon=True)
+    ado_thread = threading.Thread(target=_ado_loop, args=(stop,), daemon=True)
     thread.start()
+    ado_thread.start()
     try:
         yield
     finally:
         stop.set()
         thread.join(timeout=1)
+        ado_thread.join(timeout=1)
 
 
 app = FastAPI(title="devmem", lifespan=lifespan)
@@ -103,6 +192,7 @@ async def api_stream(request: Request):
     async def events():
         snapshot = await asyncio.to_thread(_cache.get)
         since = dict(snapshot["cursor"])  # no replay of history: pulses start from now
+        ado_cursor = _ado_pulses.since(0)[1]
         sent_sig = snapshot["graph_sig"]
         yield "retry: 3000\n\n" + _sse("state", snapshot)
         while not await request.is_disconnected():
@@ -110,12 +200,13 @@ async def api_stream(request: Request):
             try:
                 pulses, since = await asyncio.to_thread(_pulses, since)
                 snapshot = await asyncio.to_thread(_cache.get)
+                ado_pulses, ado_cursor = _ado_pulses.since(ado_cursor)
             except Exception:
                 log.exception("stream update failed")
                 yield ": error\n\n"
                 continue
-            if pulses:
-                yield _sse("pulse", pulses)
+            if pulses or ado_pulses:
+                yield _sse("pulse", pulses + ado_pulses)
             # Diff-lite: the graph (the bulk of the payload) is only re-sent when its nodes change.
             body = dict(snapshot)
             if snapshot["graph_sig"] == sent_sig:
@@ -132,6 +223,22 @@ async def api_stream(request: Request):
 @app.get("/")
 def brain(request: Request):
     return render(request, "brain.html", active="brain")
+
+
+@app.get("/ado")
+def ado(request: Request):
+    return render(request, "ado.html", snapshot=_ado_cache.get())
+
+
+@app.post("/ado/refresh")
+def ado_refresh():
+    _ado_cache.refresh()
+    return RedirectResponse("/ado", 303)
+
+
+@app.get("/api/ado")
+def api_ado():
+    return JSONResponse(_ado_cache.get())
 
 
 @app.get("/overview")

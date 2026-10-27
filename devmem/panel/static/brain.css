@@ -174,6 +174,13 @@ main.wall {
 .kind-row b { text-align: right; font-variant-numeric: tabular-nums; }
 .kind-row .k { color: var(--c); }
 
+/* ---------- Azure DevOps card ---------- */
+.panel-ado { flex: none; }
+.panel-ado h3 a { color: inherit; }
+.ado-card-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35em 0.8em; color: var(--muted); font-size: 0.82em; }
+.ado-card-counts:hover { text-decoration: none; color: var(--text); }
+.ado-card-counts b { color: var(--cyan); font-size: 1.25em; font-variant-numeric: tabular-nums; margin-right: 0.2em; }
+
 /* ---------- brain ---------- */
 .col-centre { min-width: 0; }
 

@@ -1,0 +1,58 @@
+{% extends 'base.html' %}
+{% block title %}Azure DevOps · devmem{% endblock %}
+{% block body %}
+{% if not snapshot.configured %}
+  <h1>Azure DevOps</h1>
+  <div class="card muted">Azure DevOps is not configured: <span class="mono">~/.devmem/ado_token</span> is missing or empty.</div>
+  <form action="/ado/refresh" method="post"><button type="submit">Refresh</button></form>
+{% else %}
+  {% macro pr_list(items, empty) -%}
+    {% if items %}
+      <ul class="ado-list">
+      {% for pr in items %}
+        <li>
+          <a href="{{ pr.url }}" target="_blank" rel="noopener">#{{ pr.id }} · {{ pr.title }}</a>
+          <span class="muted">{{ pr.repo }} · created {{ pr.created_date or 'unknown' }}</span>
+          <span class="ado-reviewers">
+          {% for reviewer in pr.reviewers %}{{ reviewer.name }} <b>({{ reviewer.vote }})</b>{% if not loop.last %}, {% endif %}{% endfor %}
+          </span>
+          {% if pr.pending_reviewers is defined %}<span class="muted">Pending: {{ pr.pending_reviewers|join(', ') if pr.pending_reviewers else 'no named pending reviewers' }} · {{ pr.age_label }}</span>{% endif %}
+        </li>
+      {% endfor %}
+      </ul>
+    {% else %}<p class="muted">{{ empty }}</p>{% endif %}
+  {%- endmacro %}
+
+  <div class="page-title-row">
+    <div>
+      <h1>Azure DevOps</h1>
+      <p class="muted">{{ snapshot.project_active_count }} active PRs in project AI</p>
+    </div>
+    <div class="ado-refresh">
+      <span class="muted">Last refresh: {{ snapshot.refreshed_at or 'not yet' }}</span>
+      {% if snapshot.stale %}<span class="badge ado-stale">stale</span>{% endif %}
+      {% if snapshot.error %}<span class="ado-error">{{ snapshot.error }}</span>{% endif %}
+      <form action="/ado/refresh" method="post"><button type="submit">Refresh</button></form>
+    </div>
+  </div>
+
+  <h2>Waiting for me</h2>
+  <div class="ado-grid">
+    <section class="card"><h3>To review <span class="hint">{{ snapshot.to_review|length }}</span></h3>{{ pr_list(snapshot.to_review, 'No pull requests need your review.') }}</section>
+    <section class="card"><h3>Approved, not completed <span class="hint">{{ snapshot.my_approved_not_completed|length }}</span></h3>{{ pr_list(snapshot.my_approved_not_completed, 'No approved pull requests are waiting to land.') }}</section>
+    <section class="card"><h3>Changes requested <span class="hint">{{ snapshot.my_changes_requested|length }}</span></h3>{{ pr_list(snapshot.my_changes_requested, 'No pull requests have requested changes.') }}</section>
+  </div>
+
+  <h2>Waiting for others</h2>
+  <section class="card">{{ pr_list(snapshot.my_waiting_on_others, 'No authored pull requests are waiting on reviewers.') }}</section>
+
+  <h2>My open tasks <span class="hint">{{ snapshot.open_tasks|length }}</span></h2>
+  {% if snapshot.open_tasks_by_state %}
+    {% for state, tasks in snapshot.open_tasks_by_state.items() %}
+      <section class="card ado-tasks"><h3>{{ state }} <span class="hint">{{ tasks|length }}</span></h3>
+        <ul class="ado-list">{% for task in tasks %}<li><a href="{{ task.url }}" target="_blank" rel="noopener">#{{ task.id }} · {{ task.title }}</a><span class="muted">{{ task.type }} · changed {{ task.changed_date or 'unknown' }}</span></li>{% endfor %}</ul>
+      </section>
+    {% endfor %}
+  {% else %}<p class="muted">No open work items assigned to you.</p>{% endif %}
+{% endif %}
+{% endblock %}
