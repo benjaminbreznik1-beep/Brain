@@ -7,7 +7,7 @@ import sqlite3
 import hashlib
 import sys
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
@@ -16,7 +16,8 @@ import numpy as np
 
 from .embed import EMBEDDING_DIM, EMBEDDING_MODEL, get_embedder
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+DEFAULT_MAX_CONTENT = 2000
 # bge-small-en-v1.5 scores unrelated text ~0.45-0.59 and real matches ~0.65+ (measured on ~40 memories, 2026-10).
 MIN_COSINE = 0.6
 # measured 2026-10-27 on 56 memories: real duplicates scored 0.86-0.92, related-but-distinct memories up to 0.89, so this is a hint, not a block.
@@ -77,6 +78,43 @@ def db_path() -> Path:
     return Path(os.environ.get("DEVMEM_DB", "~/.devmem/devmem.db")).expanduser()
 
 
+def max_content() -> int:
+    """Return the configured content cap, falling back to a safe default."""
+    try:
+        return max(1, int(os.environ.get("DEVMEM_MAX_CONTENT", DEFAULT_MAX_CONTENT)))
+    except ValueError:
+        return DEFAULT_MAX_CONTENT
+
+
+def validate_content(content: str) -> None:
+    """Reject content that would make a memory unsafe to retrieve in full."""
+    if len(content) > max_content():
+        raise ValueError(f"content exceeds the {max_content()} character limit; put long material in a file and save a short summary plus the file path")
+
+
+def validate_review_after(value: str | None) -> str | None:
+    """Validate an optional ISO calendar date and return its canonical form."""
+    if value is None or value == "":
+        return None
+    try:
+        return date.fromisoformat(value).isoformat()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("review_after must be an ISO date (YYYY-MM-DD)") from exc
+
+
+def today_utc() -> str:
+    return datetime.now(UTC).date().isoformat()
+
+
+def is_stale(review_after: str | None) -> bool:
+    """Whether a review date has passed in UTC."""
+    return bool(review_after and review_after < today_utc())
+
+
+def backup_dir() -> Path:
+    return Path(os.environ.get("DEVMEM_BACKUP_DIR", "~/.devmem/backups")).expanduser()
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     path = path or db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -121,6 +159,10 @@ def migrate(conn: sqlite3.Connection) -> None:
         version = 0
     else:
         version = row[0]
+    if 0 < version < SCHEMA_VERSION:
+        # Every upgrade of an existing database starts from a recoverable snapshot, before any step runs.
+        _backup_before_upgrade(conn)
+        version = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0]
     if version < 1:
         conn.executescript(V1_SCHEMA)
         conn.execute("UPDATE schema_version SET version=1")
@@ -133,6 +175,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         _migrate_v4(conn)
     if version < 5:
         _migrate_v5(conn)
+    if version < 6:
+        _migrate_v6(conn)
 
 
 _V2_STATEMENTS = (
@@ -279,6 +323,51 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
         raise
 
 
+def _backup_before_migration(conn: sqlite3.Connection, new_version: int, old_version: int) -> None:
+    """Make a WAL-safe SQLite snapshot before upgrading an existing database."""
+    destination_dir = backup_dir()
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    destination = destination_dir / f"devmem-before-v{new_version}-from-v{old_version}-{stamp}.db"
+    try:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise FileExistsError(destination)
+        source_path = next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main")
+        with sqlite3.connect(source_path) as source, sqlite3.connect(destination) as backup:
+            source.backup(backup)
+    except Exception as exc:
+        raise RuntimeError(f"devmem migration backup failed ({destination}): {exc}") from exc
+
+
+def _backup_before_upgrade(conn: sqlite3.Connection) -> None:
+    """Snapshot an existing database once per upgrade, under the upgrade lock so racing processes do not both back up."""
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        version = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0]
+        if 0 < version < SCHEMA_VERSION and not any(backup_dir().glob(f"devmem-before-v{SCHEMA_VERSION}-from-v{version}-*.db")):
+            _backup_before_migration(conn, SCHEMA_VERSION, version)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """v5 -> v6.  Adds review dates; the backup is taken by migrate() before any upgrade step."""
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        version = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0]
+        if version < 6:
+            conn.execute("ALTER TABLE memories ADD COLUMN review_after TEXT")
+            conn.execute("UPDATE schema_version SET version=6")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def parse_ts(value) -> datetime | None:
     """Parse the mixed timestamp formats found in logs (ISO with Z/offset/space, or unix epoch) to aware UTC."""
     if value is None or value == "":
@@ -402,11 +491,11 @@ def _bm25_candidates(conn: sqlite3.Connection, query: str, where_sql: str, param
     if kind:
         clauses.append("m.kind=?")
         values.append(kind)
-    rows = conn.execute(f"""SELECT m.id,m.title,m.kind,m.project,m.updated_at,
+    rows = conn.execute(f"""SELECT m.id,m.title,m.kind,m.project,m.updated_at,m.review_after,
         snippet(memories_fts,1,'<b>','</b>','…',18) snippet
         FROM memories_fts JOIN memories m ON m.id=memories_fts.rowid
         WHERE {' AND '.join(clauses)} ORDER BY bm25(memories_fts) LIMIT 50""", values).fetchall()
-    return [dict(row) for row in rows]
+    return [{**dict(row), "stale": is_stale(row["review_after"])} for row in rows]
 
 
 def hybrid_search(conn: sqlite3.Connection, query: str, *, where_sql: str, params: tuple = (),
@@ -438,7 +527,7 @@ def hybrid_search(conn: sqlite3.Connection, query: str, *, where_sql: str, param
     if kind:
         clauses.append("m.kind=?")
         values.append(kind)
-    rows = conn.execute(f"""SELECT m.id,m.title,m.kind,m.project,m.updated_at,m.content,e.vec
+    rows = conn.execute(f"""SELECT m.id,m.title,m.kind,m.project,m.updated_at,m.review_after,m.content,e.vec
         FROM memories m JOIN memory_embeddings e ON e.memory_id=m.id
         WHERE {' AND '.join(clauses)}""", values).fetchall()
     semantic: list[dict] = []
@@ -474,6 +563,7 @@ def hybrid_search(conn: sqlite3.Connection, query: str, *, where_sql: str, param
         row.pop("_score")
         row.pop("cosine", None)
         row["match"] = "both" if keyword_match and semantic_match else "keyword" if keyword_match else "semantic"
+        row["stale"] = is_stale(row.get("review_after"))
         out.append(row)
     return out
 
@@ -492,7 +582,8 @@ def project_for_cwd(cwd: str | None) -> str | None:
 
 def context_text(conn: sqlite3.Connection, project: str | None) -> str:
     """Render the compact project and global-memory briefing."""
-    pinned_rows = conn.execute("SELECT id,kind,title,content,project FROM memories WHERE pinned=1 ORDER BY updated_at DESC").fetchall()
+    current_date = today_utc()
+    pinned_rows = conn.execute("SELECT id,kind,title,content,project FROM memories WHERE pinned=1 AND (review_after IS NULL OR review_after>=?) ORDER BY updated_at DESC", (current_date,)).fetchall()
     pinned_text, cap, last_id = "", 6000 - len("## Pinned\n"), None
     for row in pinned_rows:
         name = (Path(row["project"]).name or row["project"]) if row["project"] else "global"
@@ -515,9 +606,66 @@ def context_text(conn: sqlite3.Connection, project: str | None) -> str:
         pinned_text += note
         break
     rows = conn.execute("""SELECT kind,title,content FROM memories WHERE pinned=0 AND project=? AND kind IN ('decision','preference','todo','note')
-        ORDER BY kind='note', updated_at DESC LIMIT 20""", (project,)).fetchall()
-    global_rows = conn.execute("SELECT kind,title,content FROM memories WHERE pinned=0 AND project IS NULL AND kind IN ('decision','preference') ORDER BY updated_at DESC LIMIT 40").fetchall()
+        AND (review_after IS NULL OR review_after>=?) ORDER BY kind='note', updated_at DESC LIMIT 20""", (project, current_date)).fetchall()
+    global_rows = conn.execute("""SELECT kind,title,content FROM memories WHERE pinned=0 AND project IS NULL AND kind IN ('decision','preference')
+        AND (review_after IS NULL OR review_after>=?) ORDER BY updated_at DESC LIMIT 40""", (current_date,)).fetchall()
     text = "\n".join(f"[{r['kind']}] {r['title']}: {r['content'][:200]}" for r in rows)[:1500]
     global_text = "\n".join(f"[{r['kind']}] {r['title']}" for r in global_rows)[:3000]  # titles state the rule; memory_get has the detail
     parts = [f"## Pinned\n{pinned_text}" if pinned_text else "", f"## Project\n{text}" if text else "", f"## Global preferences\n{global_text}" if global_text else ""]
     return "\n\n".join(p for p in parts if p) or "No saved project context."
+
+
+def _outdated_terms() -> list[str]:
+    """Read optional audit wording without making it a required configuration file."""
+    path = Path(os.environ.get("DEVMEM_AUDIT", "~/.devmem/audit.json")).expanduser()
+    try:
+        import json
+        data = json.loads(path.read_text(encoding="utf-8"))
+        terms = data.get("outdated_terms", []) if isinstance(data, dict) else []
+        return [term.casefold() for term in terms if isinstance(term, str) and term.strip()]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def audit_memories(conn: sqlite3.Connection) -> list[dict]:
+    """Return report-only context-rot findings, sorted by category then largest memory."""
+    cap, today = max_content(), today_utc()
+    terms = _outdated_terms()
+    rows = [dict(row) for row in conn.execute("SELECT id,title,content,project,updated_at,review_after FROM memories").fetchall()]
+    findings = []
+    for row in rows:
+        base = {key: row[key] for key in ("id", "title", "updated_at")}
+        base["size"] = len(row["content"])
+        if base["size"] > cap:
+            findings.append({**base, "reason": f"oversized (over {cap} characters)"})
+        if row["review_after"] and row["review_after"] < today:
+            findings.append({**base, "reason": "review date has passed"})
+        parsed = parse_ts(row["updated_at"])
+        if parsed and (datetime.now(UTC) - parsed).days >= 30:
+            findings.append({**base, "reason": "not updated in 30+ days"})
+        haystack = (row["title"] + "\n" + row["content"]).casefold()
+        matched = [term for term in terms if term in haystack]
+        if matched:
+            findings.append({**base, "reason": "outdated wording: " + ", ".join(matched)})
+
+    embedded = conn.execute("""SELECT m.id,m.title,m.content,m.project,m.updated_at,e.vec
+        FROM memories m JOIN memory_embeddings e ON e.memory_id=m.id WHERE e.model=? AND e.dim=? ORDER BY m.id""",
+                            (EMBEDDING_MODEL, EMBEDDING_DIM)).fetchall()
+    for index, left in enumerate(embedded):
+        left_vector = np.frombuffer(left["vec"], dtype="<f4")
+        if left_vector.size != EMBEDDING_DIM:
+            continue
+        for right in embedded[index + 1:]:
+            if left["project"] != right["project"]:
+                continue
+            right_vector = np.frombuffer(right["vec"], dtype="<f4")
+            if right_vector.size != EMBEDDING_DIM:
+                continue
+            score = float(np.dot(left_vector, right_vector))
+            if score >= 0.86:
+                findings.append({"id": left["id"], "title": left["title"], "size": len(left["content"]),
+                                 "updated_at": left["updated_at"], "reason": f"likely duplicate of #{right['id']} ({score:.2f})",
+                                 "other_id": right["id"], "other_title": right["title"], "score": round(score, 3)})
+    return sorted(findings, key=lambda item: (item["reason"], -item["size"], item["id"]))

@@ -11,13 +11,13 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from ..db import connection, ensure_embeddings, fts_query, hybrid_search, now
+from ..db import audit_memories, connection, ensure_embeddings, fts_query, hybrid_search, is_stale, now, validate_content, validate_review_after
 from ..embed import get_embedder
 from ..ingest.runner import ingest_all
 from ..ado import AdoClient, AdoError, empty_snapshot
@@ -476,22 +476,32 @@ def memory(request: Request, q: str = "", kind: str = ""):
             sql += " WHERE kind=?"
             params.append(kind)
         rows = _rows(sql + " ORDER BY updated_at DESC LIMIT 200", params)
+    for row in rows:
+        row["stale"] = is_stale(row.get("review_after"))
     return render(request, "memory.html", rows=rows, q=q, kind=kind, embedder_status=embedder_status,
                   counts=_rows("SELECT kind,COUNT(*) count FROM memories GROUP BY kind"))
 
 
 @app.post("/memory")
-def create_memory(content: str = Form(...), title: str = Form(""), kind: str = Form("note"), tags: str = Form(""), project: str = Form("")):
+def create_memory(content: str = Form(...), title: str = Form(""), kind: str = Form("note"), tags: str = Form(""), project: str = Form(""), review_after: str = Form("")):
+    try:
+        validate_content(content); review_after = validate_review_after(review_after)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     with connection() as conn:
-        conn.execute("INSERT INTO memories(project,kind,title,content,tags,created_at,updated_at,source_agent) VALUES(?,?,?,?,?,?,?,?)",
-                     (project or None, kind, title or content[:80], content, tags, now(), now(), "panel"))
+        conn.execute("INSERT INTO memories(project,kind,title,content,tags,review_after,created_at,updated_at,source_agent) VALUES(?,?,?,?,?,?,?,?,?)",
+                     (project or None, kind, title or content[:80], content, tags, review_after, now(), now(), "panel"))
     return RedirectResponse("/memory", 303)
 
 
 @app.post("/memory/{id}")
-def edit_memory(id: int, content: str = Form(...), title: str = Form(...), kind: str = Form(...), tags: str = Form("")):
+def edit_memory(id: int, content: str = Form(...), title: str = Form(...), kind: str = Form(...), tags: str = Form(""), review_after: str = Form("")):
+    try:
+        validate_content(content); review_after = validate_review_after(review_after)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     with connection() as conn:
-        conn.execute("UPDATE memories SET content=?,title=?,kind=?,tags=?,updated_at=? WHERE id=?", (content, title, kind, tags, now(), id))
+        conn.execute("UPDATE memories SET content=?,title=?,kind=?,tags=?,review_after=?,updated_at=? WHERE id=?", (content, title, kind, tags, review_after, now(), id))
     return RedirectResponse("/memory", 303)
 
 
@@ -500,3 +510,10 @@ def delete_memory(id: int):
     with connection() as conn:
         conn.execute("DELETE FROM memories WHERE id=?", (id,))
     return RedirectResponse("/memory", 303)
+
+
+@app.get("/audit")
+def audit(request: Request):
+    with connection() as conn:
+        rows = audit_memories(conn)
+    return render(request, "audit.html", rows=rows)
