@@ -247,11 +247,11 @@ def api_ado():
 @app.get("/overview")
 def overview(request: Request):
     totals = _rows("""SELECT agent,
-      SUM(CASE WHEN datetime(ts) >= datetime('now','-1 day') THEN input_tokens+output_tokens+cache_read_tokens+cache_write_tokens ELSE 0 END) today,
+      SUM(CASE WHEN datetime(ts) >= datetime('now','localtime','start of day','utc') THEN input_tokens+output_tokens+cache_read_tokens+cache_write_tokens ELSE 0 END) today,
       SUM(CASE WHEN datetime(ts) >= datetime('now','-7 days') THEN input_tokens+output_tokens+cache_read_tokens+cache_write_tokens ELSE 0 END) week,
       SUM(CASE WHEN datetime(ts) >= datetime('now','-30 days') THEN input_tokens+output_tokens+cache_read_tokens+cache_write_tokens ELSE 0 END) month
       FROM usage_events GROUP BY agent""")
-    daily = _rows("""SELECT substr(datetime(ts),1,10) day, agent,
+    daily = _rows("""SELECT date(ts,'localtime') day, agent,
       SUM(input_tokens+output_tokens+cache_read_tokens+cache_write_tokens) tokens
       FROM usage_events WHERE datetime(ts) >= datetime('now','-30 days') GROUP BY day, agent ORDER BY day""")
     projects = _rows("""SELECT COALESCE(project,'Global') project,

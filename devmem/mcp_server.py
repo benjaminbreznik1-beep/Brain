@@ -129,9 +129,13 @@ def project_context(ctx: Context | None = None) -> str:
     def work():
         _, project = _client()
         with connection() as conn:
-            rows = conn.execute("SELECT kind,title,content FROM memories WHERE project=? AND kind IN ('decision','preference','todo') ORDER BY updated_at DESC LIMIT 20", (project,)).fetchall()
-        text = "\n".join(f"[{r['kind']}] {r['title']}: {r['content']}" for r in rows)
-        return text[:1500] or "No saved project context."
+            rows = conn.execute("""SELECT kind,title,content FROM memories WHERE project=? AND kind IN ('decision','preference','todo','note')
+                ORDER BY kind='note', updated_at DESC LIMIT 20""", (project,)).fetchall()
+            global_rows = conn.execute("SELECT kind,title,content FROM memories WHERE project IS NULL AND kind IN ('decision','preference') ORDER BY updated_at DESC LIMIT 40").fetchall()
+        text = "\n".join(f"[{r['kind']}] {r['title']}: {r['content'][:200]}" for r in rows)[:1500]
+        global_text = "\n".join(f"[{r['kind']}] {r['title']}" for r in global_rows)[:3000]  # titles state the rule; memory_get has the detail
+        parts = [f"## Project\n{text}" if text else "", f"## Global preferences\n{global_text}" if global_text else ""]
+        return "\n\n".join(p for p in parts if p) or "No saved project context."
     return _call("project_context", {}, work, ctx)
 
 

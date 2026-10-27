@@ -8,7 +8,7 @@
   {% for x in totals %}
   <div class="card">
     <span class="badge {{ x.agent }}">{{ x.agent }}</span>
-    <div class="stat-label" style="margin-top:.6rem">Last 24 h</div>
+    <div class="stat-label" style="margin-top:.6rem">Today</div>
     <div class="stat-value" data-tokens="{{ x.today or 0 }}">{{ x.today or 0 }}</div>
     <div class="muted">7d <span data-tokens="{{ x.week or 0 }}">{{ x.week or 0 }}</span>
       · 30d <span data-tokens="{{ x.month or 0 }}">{{ x.month or 0 }}</span></div>
