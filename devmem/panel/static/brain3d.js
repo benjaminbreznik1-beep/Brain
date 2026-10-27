@@ -26,6 +26,65 @@
     var pendingGraph = null, pendingBloom = {}, anims = [], lastImpulse = {};
     var active = true, ready = false, fitted = false, resumeTimer = null, loopOn = false, lastTwinkle = 0;
     var texCache = {}, geomCache = {};
+    var bloomPass = null, bloomAdded = false, bloomEnabled = true;
+
+    try { bloomEnabled = localStorage.getItem("devmem.glow") !== "0"; } catch (e) { /* default on */ }
+
+    function bloomActive() { return !!(bloomPass && bloomPass.enabled); }
+
+    function haloBaseSize(n) {
+      var size = n.radius * (n.type === "hub" ? 10 : n.type === "project" ? 7 : n.type === "agent" ? 9 : 6);
+      return size * (bloomActive() ? 0.62 : 1);
+    }
+
+    function haloOpacity(n) { return n.baseGlow * (bloomActive() ? 0.42 : 1); }
+
+    function syncHalos() {
+      for (var i = 0; i < nodes.length; i++) {
+        var n = nodes[i], parts = n.parts;
+        if (!parts || !parts.halo || isAnimating(n)) continue;
+        parts.halo.material.opacity = haloOpacity(n);
+        parts.halo.scale.setScalar(haloBaseSize(n));
+      }
+    }
+
+    function resizeBloom(width, height) {
+      if (!bloomPass || !bloomPass.setSize) return;
+      // Keep the composer's full canvas target, but make the bloom buffers half-resolution.
+      bloomPass.setSize(Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2)));
+    }
+
+    function ensureBloom() {
+      if (bloomAdded || !window.__devmemBloom) return;
+      try {
+        var composer = Graph.postProcessingComposer && Graph.postProcessingComposer();
+        if (!composer || !composer.addPass) return;
+        // A plain x/y object is sufficient; UnrealBloomPass copies it into its own Vector2.
+        bloomPass = new window.__devmemBloom({ x: 1, y: 1 }, 1.4, 0.6, 0.15);
+        bloomPass.enabled = bloomEnabled;
+        composer.addPass(bloomPass);
+        bloomAdded = true;
+        var rect = container.getBoundingClientRect();
+        resizeBloom(rect.width, rect.height);
+        syncHalos();
+      } catch (e) {
+        // The graph and its halo fallback remain usable if the module/composer is incompatible.
+        bloomPass = null;
+      }
+    }
+
+    function setGlow(on) {
+      bloomEnabled = on;
+      try { localStorage.setItem("devmem.glow", on ? "1" : "0"); } catch (e) { /* storage unavailable */ }
+      if (bloomPass) bloomPass.enabled = on;
+      syncHalos();
+      var button = document.getElementById("glow-toggle");
+      if (button) {
+        button.setAttribute("aria-pressed", on ? "true" : "false");
+        button.textContent = on ? "Glow" : "Glow off";
+        button.title = on ? "Turn off 3D bloom glow" : "Turn on 3D bloom glow";
+      }
+    }
 
     Graph.renderer().setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
     Graph.backgroundColor("#050814")
@@ -51,6 +110,12 @@
       .onEngineStop(function () {
         if (!fitted && nodes.length > 2) { fitted = true; Graph.zoomToFit(900, 30); }
       });
+
+    var glowButton = document.getElementById("glow-toggle");
+    if (glowButton) glowButton.addEventListener("click", function () { setGlow(!bloomEnabled); });
+    setGlow(bloomEnabled);
+    window.addEventListener("devmem-bloom", ensureBloom);
+    ensureBloom();
 
     // ---------------------------------------------------------------- forces: web, clusters, loose brain shape
     var shapeNodes = [];
@@ -238,7 +303,7 @@
         new C.Material({ color: color, emissive: color, emissiveIntensity: n.type === "hub" ? 1.5 : 0.85, transparent: true,
           opacity: n.type === "hub" ? 0.98 : 0.95 }));
       g.add(core);
-      var halo = quad(haloTexture(), color, n.radius * (n.type === "hub" ? 10 : n.type === "project" ? 7 : n.type === "agent" ? 9 : 6), true, n.baseGlow);
+      var halo = quad(haloTexture(), color, haloBaseSize(n), true, haloOpacity(n));
       g.add(halo);
       var label = null;
       if (n.type === "project" || n.type === "agent" || n.type === "hub") {
@@ -319,10 +384,8 @@
         }
       });
       // mark structural changes on reused objects (colour/size of an existing agent etc.)
-      next.forEach(function (n) {
-        if (n.parts && n.parts.halo) n.parts.halo.material.opacity = n.baseGlow;
-      });
       nodes = next; nodeById = byId; links = nextLinks; linkByKey = nextKeys;
+      syncHalos();
       Graph.graphData({ nodes: nodes, links: links });
       startLoop();
     }
@@ -412,13 +475,13 @@
         if (a.kind === "bloom") {
           var s = t < 1 ? 1 + 2.2 * Math.pow(t - 1, 3) + 1.2 * Math.pow(t - 1, 2) : 1;   // ease-out-back
           parts.group.scale.setScalar(Math.max(0.001, s));
-          parts.halo.material.opacity = n.baseGlow + (1 - t) * 1.2;
-          parts.halo.scale.setScalar(n.radius * 6 * (1 + (1 - t) * 2.5));
+          parts.halo.material.opacity = haloOpacity(n) + (1 - t) * 1.2;
+          parts.halo.scale.setScalar(haloBaseSize(n) * (1 + (1 - t) * 2.5));
         } else {
           var f = 1 - t;
           parts.core.material.emissiveIntensity = (n.type === "hub" ? 1.5 : 0.85) + f * 1.6;
-          parts.halo.material.opacity = n.baseGlow + f * 0.9;
-          var base = n.radius * (n.type === "hub" ? 10 : n.type === "project" ? 7 : n.type === "agent" ? 9 : 6);
+          parts.halo.material.opacity = haloOpacity(n) + f * 0.9;
+          var base = haloBaseSize(n);
           parts.halo.scale.setScalar(base * (1 + f * 1.4));
         }
         if (t >= 1) {
@@ -434,8 +497,8 @@
         for (var k = 0; k < nodes.length; k++) {
           var m = nodes[k];
           if (!m.parts || m.bloomAt || isAnimating(m)) continue;
-          if (m.type === "memory") m.parts.halo.material.opacity = m.baseGlow * (0.65 + 0.35 * Math.sin(tt * (0.7 + (m.phase % 1)) + m.phase));
-          else if (m.type === "agent" && m.active) m.parts.halo.material.opacity = 0.6 + 0.35 * Math.sin(tt * 3 + m.phase);
+          if (m.type === "memory") m.parts.halo.material.opacity = haloOpacity(m) * (0.65 + 0.35 * Math.sin(tt * (0.7 + (m.phase % 1)) + m.phase));
+          else if (m.type === "agent" && m.active) m.parts.halo.material.opacity = haloOpacity(m) + (bloomActive() ? 0.15 : 0.35) * Math.sin(tt * 3 + m.phase);
         }
       }
       if (anims.length || !REDUCED) requestAnimationFrame(loop);
@@ -450,7 +513,10 @@
     // ---------------------------------------------------------------- lifecycle
     function resize() {
       var r = container.getBoundingClientRect();
-      if (r.width > 10 && r.height > 10) Graph.width(r.width).height(r.height);
+      if (r.width > 10 && r.height > 10) {
+        Graph.width(r.width).height(r.height);
+        resizeBloom(r.width, r.height);
+      }
     }
 
     function setActive(on) {

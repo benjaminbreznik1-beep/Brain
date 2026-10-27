@@ -7,6 +7,7 @@
 {% block topbar_extra %}
   <span class="clock" id="clock">--:--</span>
   <button class="ghost" id="dim-toggle" type="button" title="Switch between the 3D web and the 2D brain">3D</button>
+  <button class="ghost" id="glow-toggle" type="button" title="Toggle 3D bloom glow" aria-pressed="true">Glow</button>
   <button class="ghost" id="wall-toggle" type="button" title="Wall mode: hide navigation (key W)">Wall mode</button>
 {% endblock %}
 {% block main %}
@@ -85,8 +86,13 @@
 </main>
 {% endblock %}
 {% block scripts %}
-  <!-- The only external resource. If it fails to load, the page falls back to the 2D canvas brain. -->
+  <!-- If the 3D graph loader fails, the page falls back to the 2D canvas brain. -->
   <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.3/dist/3d-force-graph.min.js" crossorigin="anonymous"></script>
   <script src="/static/brain3d.js"></script>
+  <script type="module">
+    import { UnrealBloomPass } from "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/postprocessing/UnrealBloomPass.js/+esm";
+    window.__devmemBloom = UnrealBloomPass;
+    window.dispatchEvent(new Event("devmem-bloom"));
+  </script>
   <script src="/static/brain.js"></script>
 {% endblock %}
