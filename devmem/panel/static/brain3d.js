@@ -8,6 +8,7 @@
   "use strict";
 
   var KIND_COLORS = { note: "#60a5fa", decision: "#a78bfa", preference: "#f472b6", snippet: "#34d399", todo: "#fb923c" };
+  var LINK_COLORS = { blocks: "#fb923c", depends_on: "#fbbf24", relates_to: "#94a3b8", overlaps: "#64748b", fixes: "#34d399", supersedes: "#78716c" };
   var R = 120;                       // overall web radius (world units)
   var ADDITIVE = 2;                  // THREE.AdditiveBlending
 
@@ -112,6 +113,7 @@
       .linkOpacity(0.32)
       .linkWidth(0)
       .linkColor(function (l) { return l.color; })
+      .linkDirectionalParticles(function (l) { return l.particles || 0; })
       .linkDirectionalParticleColor(function (l) { return l.pcolor || "#ffffff"; })
       .linkDirectionalParticleWidth(function (l) { return l.pwidth || 1.6; })
       .linkDirectionalParticleSpeed(function (l) { return l.kind === "ah" ? 0.016 : 0.035; })
@@ -162,8 +164,8 @@
       return n.type === "project" ? -140 : n.type === "agent" ? -60 : n.type === "hub" ? -30 : -9;
     });
     Graph.d3Force("link")
-      .distance(function (l) { return l.kind === "ah" ? 85 : l.kind === "hp" ? 62 : l.kind === "hm" ? 26 : 14 + (l.spread || 0); })
-      .strength(function (l) { return l.kind === "ah" ? 0.04 : l.kind === "hp" ? 0.16 : 0.55; });
+      .distance(function (l) { return l.kind === "ah" ? 85 : l.kind === "hp" ? 62 : l.kind === "hm" ? 26 : l.kind === "ml" ? 34 : 14 + (l.spread || 0); })
+      .strength(function (l) { return l.kind === "ah" ? 0.04 : l.kind === "hp" ? 0.16 : l.kind === "ml" ? 0.07 : 0.55; });
 
     // ---------------------------------------------------------------- auto-rotation, paused while the user orbits/zooms
     var controls = Graph.controls();
@@ -380,10 +382,10 @@
           active: a.active, connected: a.connected, radius: 3.2, color: agentColor(a.agent), baseGlow: a.active ? 0.9 : 0.5, val: 4 });
       });
       var nextLinks = [], nextKeys = {};
-      function link(src, dst, kind, color, spread) {
-        var key = src + ">" + dst;
+      function link(src, dst, kind, color, spread, suffix) {
+        var key = src + ">" + dst + (suffix || "");
         var l = linkByKey[key] || { source: src, target: dst };
-        l.kind = kind; l.color = color; l.spread = spread || 0;
+        l.kind = kind; l.color = color; l.spread = spread || 0; l.particles = 0;
         nextLinks.push(l); nextKeys[key] = l;
       }
       var perCluster = {};
@@ -398,6 +400,13 @@
         } else if (n.type === "project") {
           link("__brain__", n.id, "hp", "#6d5fd6");
         }
+      });
+      (g.links || []).forEach(function (l) {
+        if (!byId["m:" + l.from_id] || !byId["m:" + l.to_id]) return;
+        link("m:" + l.from_id, "m:" + l.to_id, "ml", LINK_COLORS[l.type] || "#94a3b8", 0, ":" + l.type);
+        var edge = nextLinks[nextLinks.length - 1];
+        edge.particles = /^(blocks|depends_on|supersedes)$/.test(l.type) ? 1 : 0;
+        edge.pwidth = 0.8; edge.pcolor = edge.color;
       });
       nodes = next; nodeById = byId; links = nextLinks; linkByKey = nextKeys;
       syncHalos();

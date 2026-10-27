@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 from .db import context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, project_for_cwd, readonly_connection
@@ -11,6 +12,12 @@ from .embed import get_embedder
 
 _NO_CONTEXT = "No saved project context."
 _HOOK_HEADER = "devmem memory (auto-loaded at session start; use memory_search / memory_get for more):"
+_REMINDER_RULES = (
+    (r"\bgit\s+(switch\s+-c|checkout\s+-b)\b", "New branch started: if this belongs to a tracked task, update its status line in memory (the pinned board and the task's own memory)."),
+    (r"\bgit\s+commit\b", "Commit made: update the task's status in memory (pinned board + task memory) if its phase changed."),
+    (r"\bgit\s+merge\b", "Merge done: mark the task's phase in memory (pinned board + task memory)."),
+    (r"run-codex-tasks\.sh|codex\s+exec", "Work dispatched to Codex: record 'dispatched' in the task's memory now and update it again when the result comes back."),
+)
 
 
 def _hook_cwd() -> str:
@@ -28,6 +35,47 @@ def _context_for_cwd(cwd: str) -> str:
     with readonly_connection() as conn:
         return context_text(conn, project_for_cwd(cwd))
 
+
+def _reminder_rules():
+    path = os.environ.get("DEVMEM_REMINDERS", "~/.devmem/reminders.json")
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return _REMINDER_RULES
+    except Exception as exc:
+        print(f"devmem remind: {exc}", file=sys.stderr)
+        return ()
+    try:
+        if not isinstance(data, dict) or not isinstance(data["rules"], list): raise ValueError("invalid reminders config")
+        rules = []
+        for rule in data["rules"]:
+            if not isinstance(rule, dict) or not isinstance(rule.get("pattern"), str) or not isinstance(rule.get("message"), str):
+                print("devmem remind: invalid rule", file=sys.stderr); continue
+            rules.append((rule["pattern"], rule["message"]))
+    except Exception as exc:
+        print(f"devmem remind: {exc}", file=sys.stderr)
+        return ()
+    return rules
+
+
+def _remind_hook() -> None:
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict) or payload.get("tool_name") != "Bash": return
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if not isinstance(command, str): return
+        for pattern, message in _reminder_rules():
+            try:
+                if re.search(pattern, command):
+                    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": "devmem reminder: " + message}}, separators=(",", ":")))
+                    return
+            except re.error as exc:
+                print(f"devmem remind: invalid regex: {exc}", file=sys.stderr)
+    except Exception as exc:
+        print(f"devmem remind: {exc}", file=sys.stderr)
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devmem")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -39,6 +87,8 @@ def main() -> None:
     context = sub.add_parser("context")
     context.add_argument("--cwd")
     context.add_argument("--hook", action="store_true")
+    remind = sub.add_parser("remind")
+    remind.add_argument("--hook", action="store_true")
     args = parser.parse_args()
     if args.command == "mcp":
         from .mcp_server import run; run()
@@ -83,6 +133,8 @@ def main() -> None:
                 print(briefing)
         except Exception as exc:
             print(f"devmem context: {exc}", file=sys.stderr)
+    elif args.command == "remind":
+        if args.hook: _remind_hook()
     else:
         if not fts_query(args.q): return
         with connection() as conn:

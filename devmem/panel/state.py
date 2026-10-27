@@ -243,6 +243,9 @@ def graph(conn, sessions: list[dict[str, Any]], clients: list[dict[str, Any]]) -
         else:
             m["cluster"], other = "other", True
         m["created_at"] = _iso(m["created_at"])
+    memory_ids = {m["id"] for m in mems}
+    links = [dict(r) for r in conn.execute("SELECT from_id,to_id,type FROM memory_links ORDER BY type,from_id,to_id").fetchall()
+             if r["from_id"] in memory_ids and r["to_id"] in memory_ids]
     projects = [{"id": p, "name": basename(p), "path": p, "last_activity": _iso(last[p]), **counts.get(p, {"activity": 0, "memories": 0})}
                 for p in ranked]
     if other:
@@ -264,13 +267,14 @@ def graph(conn, sessions: list[dict[str, Any]], clients: list[dict[str, Any]]) -
         agents.append({"id": f"mcp:{c['id']}", "agent": c["family"], "session_id": None,
                        "project": c["project"] if c["project"] in chosen else None, "project_name": c["project_name"],
                        "active": False, "connected": True})
-    return {"projects": projects, "memories": mems, "agents": agents}
+    return {"projects": projects, "memories": mems, "agents": agents, "links": links}
 
 
 def graph_signature(g: dict[str, Any]) -> str:
     """Changes when nodes or edges change (not on per-project counters), so clients re-layout only when needed."""
     key = [[p["id"] for p in g["projects"]], [(m["id"], m["cluster"], m["kind"]) for m in g["memories"]],
-           [(a["id"], a["project"], a["active"], a["connected"]) for a in g["agents"]]]
+           [(a["id"], a["project"], a["active"], a["connected"]) for a in g["agents"]],
+           [(l["from_id"], l["to_id"], l["type"]) for l in g.get("links", [])]]
     return hashlib.sha1(json.dumps(key, default=str).encode()).hexdigest()[:16]
 
 

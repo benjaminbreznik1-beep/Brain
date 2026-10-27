@@ -115,3 +115,24 @@ cli.main()
     env = {**os.environ, "DEVMEM_DB": str(db_file), "DEVMEM_EMBED": "1"}
     result = subprocess.run([sys.executable, "-c", script], input="[]", text=True, capture_output=True, env=env, cwd=tmp_path)
     assert result.returncode == 0 and result.stdout == ""
+
+
+def test_remind_hook_defaults_and_quiet_cases(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("DEVMEM_REMINDERS", str(tmp_path / "missing.json"))
+    cases = [("git switch -c task", "New branch started:"), ("git commit -m x", "Commit made:"),
+             ("git merge task", "Merge done:"), ("codex exec task", "Work dispatched to Codex:")]
+    for command, message in cases:
+        result = _run_cli(monkeypatch, capsys, ["remind", "--hook"], json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/x"}))
+        assert json.loads(result.out)["hookSpecificOutput"]["additionalContext"] == "devmem reminder: " + message + ({"New branch started:": " if this belongs to a tracked task, update its status line in memory (the pinned board and the task's own memory).", "Commit made:": " update the task's status in memory (pinned board + task memory) if its phase changed.", "Merge done:": " mark the task's phase in memory (pinned board + task memory).", "Work dispatched to Codex:": " record 'dispatched' in the task's memory now and update it again when the result comes back."}[message])
+    assert _run_cli(monkeypatch, capsys, ["remind", "--hook"], '{"tool_name":"Read"}').out == ""
+    assert _run_cli(monkeypatch, capsys, ["remind", "--hook"], '{"tool_name":"Bash","tool_input":{"command":"ls"}}').out == ""
+    assert _run_cli(monkeypatch, capsys, ["remind", "--hook"], "bad").out == ""
+
+
+def test_remind_hook_override_and_invalid_regex(tmp_path, monkeypatch, capsys):
+    rules = tmp_path / "reminders.json"
+    rules.write_text(json.dumps({"rules": [{"pattern": "[", "message": "bad"}, {"pattern": "deploy", "message": "Ship it"}]}))
+    monkeypatch.setenv("DEVMEM_REMINDERS", str(rules))
+    result = _run_cli(monkeypatch, capsys, ["remind", "--hook"], '{"tool_name":"Bash","tool_input":{"command":"deploy now"}}')
+    assert json.loads(result.out)["hookSpecificOutput"]["additionalContext"] == "devmem reminder: Ship it"
+    assert "invalid regex" in result.err

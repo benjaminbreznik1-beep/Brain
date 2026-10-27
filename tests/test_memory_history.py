@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 
 from devmem import mcp_server
-from devmem.db import (EMBEDDING_DIM, EMBEDDING_MODEL, V1_SCHEMA, _migrate_v2, _migrate_v3,
-                       connect, context_text, embedding_hash)
+from devmem.db import (EMBEDDING_DIM, EMBEDDING_MODEL, V1_SCHEMA, _migrate_v2, _migrate_v3, _migrate_v4,
+                       connect, connection, context_text, embedding_hash)
 from devmem.embed import set_embedder
 
 
@@ -94,12 +94,58 @@ def test_v3_migrates_to_v4_without_losing_rows_or_embeddings(tmp_path):
     conn.execute("INSERT INTO memory_embeddings VALUES(?,?,?,?,?)", (memory_id, EMBEDDING_MODEL, EMBEDDING_DIM, embedding_hash("title", "body", "tag"), vector))
     conn.commit(); conn.close()
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 5
     assert migrated.execute("SELECT project,pinned FROM memories").fetchone()[:] == (None, 0)
     assert migrated.execute("SELECT vec FROM memory_embeddings WHERE memory_id=?", (memory_id,)).fetchone()[0] == vector
     migrated.close()
     again = connect(path)
     assert again.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+
+
+def test_v4_migrates_to_v5_without_losing_rows_revisions_or_embeddings(tmp_path):
+    path = tmp_path / "v4.db"
+    conn = sqlite3.connect(path); conn.row_factory = sqlite3.Row
+    conn.executescript(V1_SCHEMA)
+    conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)"); conn.execute("INSERT INTO schema_version VALUES (1)")
+    _migrate_v2(conn); _migrate_v3(conn); _migrate_v4(conn)
+    memory_id = conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,created_at,updated_at) VALUES(NULL,'note','title','body','tag',0,'x','x')").lastrowid
+    conn.execute("UPDATE memories SET content='new' WHERE id=?", (memory_id,))
+    vector = _vector(1, 0).astype("<f4").tobytes()
+    conn.execute("INSERT INTO memory_embeddings VALUES(?,?,?,?,?)", (memory_id, EMBEDDING_MODEL, EMBEDDING_DIM, embedding_hash("title", "new", "tag"), vector))
+    conn.commit(); conn.close()
+    migrated = connect(path)
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+    assert migrated.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
+    assert migrated.execute("SELECT COUNT(*) FROM memory_revisions").fetchone()[0] == 1
+    assert migrated.execute("SELECT vec FROM memory_embeddings WHERE memory_id=?", (memory_id,)).fetchone()[0] == vector
+    migrated.close()
+    again = connect(path)
+    assert again.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+
+
+def test_memory_links_validate_list_unlink_and_restore(memory_tools):
+    first = mcp_server.memory_save("one", title="One")["id"]
+    second = mcp_server.memory_save("two", title="Two")["id"]
+    third = mcp_server.memory_save("three", title="Three")["id"]
+    with pytest.raises(ValueError): mcp_server.memory_link(first, 999, "blocks")
+    with pytest.raises(ValueError): mcp_server.memory_link(first, second, "bad")
+    with pytest.raises(ValueError): mcp_server.memory_link(first, first, "blocks")
+    link = mcp_server.memory_link(first, second, "blocks", "old")
+    assert mcp_server.memory_link(first, second, "blocks", "new")["id"] == link["id"]
+    mcp_server.memory_link(second, first, "relates_to")
+    assert [(l["type"], l["direction"], l["other_id"], l["note"]) for l in mcp_server.memory_get(first)["links"]] == [("blocks", "out", second, "new"), ("relates_to", "in", second, "")]
+    assert mcp_server.memory_unlink(first, second, "blocks") == {"removed": 1}
+    assert mcp_server.memory_unlink(second, first) == {"removed": 1}
+    mcp_server.memory_link(first, second, "depends_on")
+    mcp_server.memory_link(first, third, "fixes")
+    mcp_server.memory_delete(first)
+    revision = mcp_server.memory_history(first)[0]["id"]
+    with connection() as conn:
+        archived = conn.execute("SELECT memory_revision_id FROM memory_link_revisions ORDER BY id DESC LIMIT 2").fetchall()
+    assert {r["memory_revision_id"] for r in archived} == {revision}
+    mcp_server.memory_delete(third)
+    assert mcp_server.memory_restore(first, revision)["id"] == first
+    assert [(l["type"], l["other_id"]) for l in mcp_server.memory_get(first)["links"]] == [("depends_on", second)]
 
 
 def test_similar_hints_are_scoped_and_embedding_failures_do_not_block(memory_tools, monkeypatch):

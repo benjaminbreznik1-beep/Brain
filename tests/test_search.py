@@ -128,9 +128,17 @@ def _drop_v4(conn):
     conn.execute("ALTER TABLE memories DROP COLUMN pinned")
 
 
+def _drop_v5(conn):
+    conn.execute("DROP TRIGGER memories_links_ad")
+    conn.execute("DROP TRIGGER memory_links_revisions_bd")
+    conn.execute("DROP TABLE memory_link_revisions")
+    conn.execute("DROP TABLE memory_links")
+
+
 def test_v2_database_migrates_to_memory_embeddings(tmp_path):
     path = tmp_path / "previous.db"
     conn = connect(path)
+    _drop_v5(conn)
     _drop_v4(conn)
     conn.execute("DROP TRIGGER memories_embeddings_ad")
     conn.execute("DROP TABLE memory_embeddings")
@@ -139,7 +147,7 @@ def test_v2_database_migrates_to_memory_embeddings(tmp_path):
     conn.close()
 
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 5
     assert migrated.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_embeddings'").fetchone()
     assert migrated.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_embeddings_ad'").fetchone()
 
@@ -148,6 +156,7 @@ def test_v2_to_v3_migration_preserves_memories_fts_and_is_idempotent(tmp_path):
     path = tmp_path / "v2.db"
     conn = connect(path)
     memory_id = _memory(conn, "Needle title", "needle body", tags="tag")
+    _drop_v5(conn)
     _drop_v4(conn)
     conn.execute("DROP TRIGGER memories_embeddings_ad")
     conn.execute("DROP TABLE memory_embeddings")
@@ -156,7 +165,7 @@ def test_v2_to_v3_migration_preserves_memories_fts_and_is_idempotent(tmp_path):
     migrated = connect(path)
     assert migrated.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
     assert migrated.execute("SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'needle'").fetchone()[0] == memory_id
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 5
     migrated.close()
     again = connect(path)
     assert again.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1

@@ -16,7 +16,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from .db import connection, context_text, embed_memory, hybrid_search, now, project_for_cwd, similar_memories
 
-mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
+mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Link related memories instead of repeating their content. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
 _client_name: str | None = None
 
@@ -211,7 +211,7 @@ def memory_search(query: str, limit: int = 8, kind: str | None = None, scope: st
     return _call("memory_search", {"query": query, "limit": limit, "kind": kind, "scope": scope}, work, ctx)
 
 
-@mcp.tool(description="Fetch a memory by id when a search result needs its full content.")
+@mcp.tool(description="Fetch a memory by id when a search result needs its full content and linked facts.")
 def memory_get(id: int, ctx: Context | None = None) -> dict | None:
     return _call("memory_get", {"id": id}, lambda: _get(id), ctx)
 
@@ -221,7 +221,39 @@ def _get(id: int):
         if not row: return None
         result = dict(row)
         result["revisions"] = conn.execute("SELECT COUNT(*) FROM memory_revisions WHERE memory_id=?", (id,)).fetchone()[0]
+        result["links"] = [dict(link) for link in conn.execute("""SELECT l.id,l.type,'out' direction,l.to_id other_id,m.title other_title,l.note
+            FROM memory_links l JOIN memories m ON m.id=l.to_id WHERE l.from_id=?
+            UNION ALL SELECT l.id,l.type,'in',l.from_id,m.title,l.note
+            FROM memory_links l JOIN memories m ON m.id=l.from_id WHERE l.to_id=?
+            ORDER BY type,other_id""", (id, id)).fetchall()]
         return result
+
+
+_LINK_TYPES = ("blocks", "depends_on", "relates_to", "overlaps", "fixes", "supersedes")
+
+
+@mcp.tool(description="Link two memories with a typed relation (blocks, depends_on, relates_to, overlaps, fixes, supersedes) so related facts are found together; use instead of repeating the other memory's content.")
+def memory_link(from_id: int, to_id: int, type: str, note: str = "", ctx: Context | None = None) -> dict:
+    def work():
+        if from_id == to_id: raise ValueError("cannot link a memory to itself")
+        if type not in _LINK_TYPES: raise ValueError("type must be " + ", ".join(_LINK_TYPES))
+        with connection() as conn:
+            if not conn.execute("SELECT 1 FROM memories WHERE id=?", (from_id,)).fetchone() or not conn.execute("SELECT 1 FROM memories WHERE id=?", (to_id,)).fetchone():
+                raise ValueError("both memories must exist")
+            conn.execute("""INSERT INTO memory_links(from_id,to_id,type,note,created_at) VALUES(?,?,?,?,?)
+                ON CONFLICT(from_id,to_id,type) DO UPDATE SET note=excluded.note""", (from_id, to_id, type, note, now()))
+            return dict(conn.execute("SELECT * FROM memory_links WHERE from_id=? AND to_id=? AND type=?", (from_id, to_id, type)).fetchone())
+    return _call("memory_link", {"from_id": from_id, "to_id": to_id, "type": type}, work, ctx)
+
+
+@mcp.tool(description="Remove one typed link between memories, or every link type between them when type is omitted.")
+def memory_unlink(from_id: int, to_id: int, type: str | None = None, ctx: Context | None = None) -> dict:
+    def work():
+        if type is not None and type not in _LINK_TYPES: raise ValueError("type must be " + ", ".join(_LINK_TYPES))
+        with connection() as conn:
+            cur = conn.execute("DELETE FROM memory_links WHERE from_id=? AND to_id=?" + (" AND type=?" if type is not None else ""), (from_id, to_id, type) if type is not None else (from_id, to_id))
+        return {"removed": cur.rowcount}
+    return _call("memory_unlink", {"from_id": from_id, "to_id": to_id, "type": type}, work, ctx)
 
 
 @mcp.tool(description="Correct an existing memory when a fact changes; its prior version is kept in history. Never use for secrets.")
@@ -270,6 +302,12 @@ def memory_restore(id: int, revision_id: int, ctx: Context | None = None) -> dic
             else:
                 conn.execute("""INSERT INTO memories(id,project,kind,title,content,tags,pinned,created_at,updated_at,source_agent)
                     VALUES(?,?,?,?,?,?,?,?,?,?)""", (id, row["project"], row["kind"], row["title"], row["content"], row["tags"], row["pinned"], row["created_at"] or now(), now(), _client_name or "mcp-client"))
+                if row["op"] == "delete":
+                    conn.execute("""INSERT OR IGNORE INTO memory_links(from_id,to_id,type,note,created_at)
+                        SELECT from_id,to_id,type,note,created_at FROM memory_link_revisions
+                        WHERE memory_revision_id=? AND (from_id=? OR to_id=?)
+                          AND EXISTS(SELECT 1 FROM memories WHERE id=CASE WHEN from_id=? THEN to_id ELSE from_id END)""",
+                        (revision_id, id, id, id))
         return _get(id)
     return _call("memory_restore", {"id": id, "revision_id": revision_id}, work, ctx)
 

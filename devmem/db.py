@@ -16,7 +16,7 @@ import numpy as np
 
 from .embed import EMBEDDING_DIM, EMBEDDING_MODEL, get_embedder
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # bge-small-en-v1.5 scores unrelated text ~0.45-0.59 and real matches ~0.65+ (measured on ~40 memories, 2026-10).
 MIN_COSINE = 0.6
 # measured 2026-10-27 on 56 memories: real duplicates scored 0.86-0.92, related-but-distinct memories up to 0.89, so this is a hint, not a block.
@@ -131,6 +131,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         _migrate_v3(conn)
     if version < 4:
         _migrate_v4(conn)
+    if version < 5:
+        _migrate_v5(conn)
 
 
 _V2_STATEMENTS = (
@@ -228,6 +230,49 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
             for statement in _V4_STATEMENTS:
                 conn.execute(statement)
             conn.execute("UPDATE schema_version SET version=4")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+_V5_STATEMENTS = (
+    """CREATE TABLE memory_links (
+      id INTEGER PRIMARY KEY, from_id INTEGER NOT NULL, to_id INTEGER NOT NULL,
+      type TEXT NOT NULL CHECK(type IN ('blocks','depends_on','relates_to','overlaps','fixes','supersedes')),
+      note TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+      UNIQUE(from_id,to_id,type), CHECK(from_id != to_id)
+    )""",
+    "CREATE INDEX memory_links_from_id ON memory_links(from_id)",
+    "CREATE INDEX memory_links_to_id ON memory_links(to_id)",
+    """CREATE TABLE memory_link_revisions (
+      id INTEGER PRIMARY KEY, link_id INTEGER NOT NULL, from_id INTEGER NOT NULL, to_id INTEGER NOT NULL,
+      type TEXT NOT NULL, note TEXT NOT NULL, created_at TEXT NOT NULL, removed_at TEXT NOT NULL, memory_revision_id INTEGER
+    )""",
+    "CREATE INDEX memory_link_revisions_from_id ON memory_link_revisions(from_id)",
+    "CREATE INDEX memory_link_revisions_to_id ON memory_link_revisions(to_id)",
+    """CREATE TRIGGER memory_links_revisions_bd BEFORE DELETE ON memory_links BEGIN
+      INSERT INTO memory_link_revisions(link_id,from_id,to_id,type,note,created_at,removed_at,memory_revision_id)
+      VALUES(old.id,old.from_id,old.to_id,old.type,old.note,old.created_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'),NULL);
+    END""",
+    """CREATE TRIGGER memories_links_ad AFTER DELETE ON memories BEGIN
+      DELETE FROM memory_links WHERE from_id=old.id OR to_id=old.id;
+      UPDATE memory_link_revisions SET memory_revision_id=(SELECT MAX(id) FROM memory_revisions WHERE memory_id=old.id AND op='delete')
+      WHERE memory_revision_id IS NULL AND (from_id=old.id OR to_id=old.id)
+        AND removed_at=(SELECT revised_at FROM memory_revisions WHERE memory_id=old.id AND op='delete' ORDER BY id DESC LIMIT 1);
+    END""",
+)
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """v4 -> v5.  Links and their delete history remain independent of deleted memories."""
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 5:
+            for statement in _V5_STATEMENTS:
+                conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=5")
         conn.commit()
     except Exception:
         conn.rollback()

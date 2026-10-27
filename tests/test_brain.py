@@ -94,6 +94,21 @@ def test_v1_to_v2_migration_keeps_data(tmp_path):
     connect(path).close()  # idempotent on reopen
 
 
+def test_graph_memory_links_and_signature(tmp_path):
+    from devmem.panel import state
+    conn = connect(tmp_path / "links.db")
+    first = conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,created_at,updated_at) VALUES('/p','note','One','', '',0,'x','x')").lastrowid
+    second = conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,created_at,updated_at) VALUES('/p','note','Two','', '',0,'x','x')").lastrowid
+    g = state.graph(conn, [], [])
+    before = state.graph_signature(g)
+    conn.execute("INSERT INTO memory_links(from_id,to_id,type,note,created_at) VALUES(?,?, 'blocks','', 'x')", (first, second))
+    g = state.graph(conn, [], [])
+    assert g["links"] == [{"from_id": first, "to_id": second, "type": "blocks"}]
+    assert state.graph_signature(g) != before
+    conn.execute("DELETE FROM memories WHERE id=?", (second,))
+    assert state.graph(conn, [], [])["links"] == []
+
+
 # ---------------------------------------------------------------- Claude activity
 
 def test_claude_tool_use_summary_rules():

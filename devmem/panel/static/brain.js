@@ -6,6 +6,7 @@
   var REDUCED = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   var AGENT_COLORS = { claude: "#fbbf24", "claude-subagent": "#fde68a", codex: "#22d3ee" };
   var KIND_COLORS = { note: "#60a5fa", decision: "#a78bfa", preference: "#f472b6", snippet: "#34d399", todo: "#fb923c" };
+  var LINK_COLORS = { blocks: "#fb923c", depends_on: "#fbbf24", relates_to: "#94a3b8", overlaps: "#64748b", fixes: "#34d399", supersedes: "#78716c" };
   var KIND_ORDER = ["decision", "preference", "note", "snippet", "todo"];
   var STALE_S = 6 * 3600;
   var $ = function (id) { return document.getElementById(id); };
@@ -507,7 +508,8 @@
       }
       sim.nodes(nodes.filter(function (n) { return n.type !== "agent"; }));
       sim.force("link", d3.forceLink(memLinks).id(function (n) { return n.id; })
-        .distance(function (l) { return (l.target.cluster === "global" ? 14 : 18) * G.s + 6; }).strength(0.12));
+        .distance(function (l) { return l.kind === "ml" ? 30 * G.s + 8 : (l.target.cluster === "global" ? 14 : 18) * G.s + 6; })
+        .strength(function (l) { return l.kind === "ml" ? 0.025 : 0.12; }));
       sim.force("charge").strength(function (n) { return n.type === "project" ? -70 * G.s : -5 * G.s; });
       sim.force("x").x(function (n) { return n.ax; });
       sim.force("y").y(function (n) { return n.ay; });
@@ -548,12 +550,15 @@
       nodes.forEach(function (n) {
         if (n.type === "memory") {
           var parent = n.cluster === "global" ? "__brain__" : "p:" + n.cluster;
-          if (byId[parent]) memLinks.push({ source: parent, target: n.id });
+          if (byId[parent]) memLinks.push({ source: parent, target: n.id, kind: "pm" });
         } else if (n.type === "agent") {
           agentLinks.push({ source: n, target: byId.__brain__ });
         } else if (n.type === "project") {
           projectLinks.push({ source: byId.__brain__, target: n });
         }
+      });
+      (g.links || []).forEach(function (l) {
+        if (byId["m:" + l.from_id] && byId["m:" + l.to_id]) memLinks.push({ source: "m:" + l.from_id, target: "m:" + l.to_id, kind: "ml", type: l.type });
       });
       assignAnchors();
       buildSim(firstGraph ? 1 : 0.25);
@@ -661,6 +666,19 @@
         ctx.moveTo(s.x, s.y); ctx.lineTo(d.x, d.y);
       }
       ctx.stroke();
+
+      memLinks.forEach(function (l) {
+        if (l.kind !== "ml") return;
+        var s = typeof l.source === "object" ? l.source : nodeById[l.source], d = typeof l.target === "object" ? l.target : nodeById[l.target];
+        if (!s || !d || s.x === undefined || d.x === undefined) return;
+        var color = LINK_COLORS[l.type] || "#94a3b8";
+        ctx.strokeStyle = color + "66"; ctx.lineWidth = 0.65;
+        ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(d.x, d.y); ctx.stroke();
+        if (!REDUCED && /^(blocks|depends_on|supersedes)$/.test(l.type)) {
+          var q = (t * 0.18 + hash(l.source + ">" + l.target + l.type)) % 1;
+          ctx.fillStyle = color; ctx.beginPath(); ctx.arc(s.x + (d.x - s.x) * q, s.y + (d.y - s.y) * q, 1.2, 0, Math.PI * 2); ctx.fill();
+        }
+      });
 
       // synapses: agent -> brain, then brain -> project
       agentLinks.forEach(function (l) {

@@ -41,6 +41,22 @@ Use `devmem context [--cwd DIR]` for a compact project briefing. To give Claude 
 
 Updates and deletes retain a revision history; use `memory_history` to inspect it and `memory_restore` to undo a change or recover a deleted memory. `memory_save` may return same-scope `similar` hints when embeddings are available: they never block a save, but a duplicate should be merged into the existing memory. Set `pinned=true` only for memories every session needs; pinned memories from every project appear first in the context briefing. With `DEVMEM_EMBED=0`, saves still work normally and omit similar hints.
 
+Use `memory_link` to connect two memories with `blocks`, `depends_on`, `relates_to`, `overlaps`, `fixes`, or `supersedes`, instead of repeating the related memory's content. Use `memory_unlink` to remove one typed link or all link types between two memories.
+
+## Reminders
+
+To receive lightweight reminders after relevant shell commands, add this to Claude Code's `settings.json` by hand:
+
+```json
+{"hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "devmem remind --hook"}]}]}}
+```
+
+Optionally set `~/.devmem/reminders.json` (or `DEVMEM_REMINDERS`) to override the built-in rules:
+
+```json
+{"rules": [{"pattern": "<python regex>", "message": "<text>"}]}
+```
+
 ## Azure DevOps
 
 ADO is optional and read-only. Create a PAT with **Work Items: Read** and **Code: Read**, store it in `~/.devmem/ado_token`, then run `chmod 600 ~/.devmem/ado_token`. The organization and project are currently hard-coded as `example-org` and `ExampleProject`. When the token exists, the running panel polls ADO every 5 minutes. MCP clients can call `ado_status`; it reads the panel cache, so the panel must be running (set `DEVMEM_PANEL_PORT` if it is not on the default port). The ADO tab shows a `!` for changes since it was last opened; `GET /api/ado/changes` exposes the in-memory change journal.
