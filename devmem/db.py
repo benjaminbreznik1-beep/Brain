@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import hashlib
+import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -16,7 +17,7 @@ import numpy as np
 from .embed import EMBEDDING_DIM, EMBEDDING_MODEL, get_embedder
 
 SCHEMA_VERSION = 3
-# bge-small scores unrelated text ~0.45-0.59 and real matches ~0.65+ (measured on the live memories).
+# bge-small-en-v1.5 scores unrelated text ~0.45-0.59 and real matches ~0.65+ (measured on ~40 memories, 2026-10).
 MIN_COSINE = 0.6
 
 
@@ -237,9 +238,7 @@ def _normalise(vectors: np.ndarray) -> np.ndarray | None:
 
 
 def ensure_embeddings(conn: sqlite3.Connection, limit: int = 200) -> dict[str, int]:
-    """Fill at most ``limit`` stale rows.  Failure is intentionally silent to callers."""
-    if os.environ.get("DEVMEM_EMBED") == "0":
-        return {"embedded": 0, "pending": 0}
+    """Fill at most ``limit`` stale rows; embedding-model failures are silent (embedded=0); database errors propagate."""
     rows = conn.execute("""SELECT m.id,m.title,m.content,m.tags,e.model,e.content_hash,e.dim
         FROM memories m LEFT JOIN memory_embeddings e ON e.memory_id=m.id ORDER BY m.id""").fetchall()
     all_stale = [row for row in rows if row["model"] != EMBEDDING_MODEL or row["dim"] != EMBEDDING_DIM
@@ -252,17 +251,22 @@ def ensure_embeddings(conn: sqlite3.Connection, limit: int = 200) -> dict[str, i
             [embedding_text(row["title"], row["content"], row["tags"]) for row in stale]
         )
         normalised = _normalise(vectors) if vectors is not None else None
-    except Exception:
+    except Exception as exc:
+        print(f"devmem: embedding normalisation failed: {type(exc).__name__}: {exc}"[:250], file=sys.stderr)
         normalised = None
     if normalised is None:
         return {"embedded": 0, "pending": len(all_stale)}
+    embedded = 0
     for row, vector in zip(stale, normalised, strict=True):
-        conn.execute("""INSERT INTO memory_embeddings(memory_id,model,dim,content_hash,vec) VALUES(?,?,?,?,?)
+        cur = conn.execute("""INSERT INTO memory_embeddings(memory_id,model,dim,content_hash,vec)
+            SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM memories WHERE id=?)
             ON CONFLICT(memory_id) DO UPDATE SET model=excluded.model,dim=excluded.dim,
             content_hash=excluded.content_hash,vec=excluded.vec""",
             (row["id"], EMBEDDING_MODEL, EMBEDDING_DIM,
-             embedding_hash(row["title"], row["content"], row["tags"]), vector.astype("<f4").tobytes()))
-    return {"embedded": len(stale), "pending": len(all_stale) - len(stale)}
+             embedding_hash(row["title"], row["content"], row["tags"]), vector.astype("<f4").tobytes(), row["id"]))
+        embedded += cur.rowcount
+    # A skipped row disappeared between the read and conditional upsert, so it is not pending.
+    return {"embedded": embedded, "pending": len(all_stale) - len(stale)}
 
 
 def _bm25_candidates(conn: sqlite3.Connection, query: str, where_sql: str, params: tuple, kind: str | None) -> list[dict]:
@@ -284,17 +288,23 @@ def hybrid_search(conn: sqlite3.Connection, query: str, *, where_sql: str, param
                   kind: str | None = None, limit: int = 8) -> list[dict]:
     """Fuse FTS and local-vector rankings using Reciprocal Rank Fusion (k=60)."""
     keyword = _bm25_candidates(conn, query, where_sql, params, kind)
+    for row in keyword:
+        row["match"] = "keyword"  # same result shape on the BM25-only fallback paths
     if not fts_query(query):
         return keyword[:limit]
     if os.environ.get("DEVMEM_EMBED") == "0":
         return keyword[:limit]
 
-    # This may populate stale rows and may load the local model.  Both are best-effort.
-    ensure_embeddings(conn)
+    # These may populate stale rows and load the local model.  Both are best-effort.
+    try:
+        ensure_embeddings(conn)
+    except sqlite3.Error as exc:
+        print(f"devmem: embedding backfill skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
     try:
         query_vector = get_embedder().embed([query], query=True)
         normalised_query = _normalise(query_vector) if query_vector is not None else None
-    except Exception:
+    except Exception as exc:
+        print(f"devmem: query embedding normalisation failed: {type(exc).__name__}: {exc}"[:250], file=sys.stderr)
         normalised_query = None
     if normalised_query is None:
         return keyword[:limit]

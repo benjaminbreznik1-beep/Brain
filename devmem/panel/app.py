@@ -13,8 +13,10 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..db import connection, ensure_embeddings, fts_query, hybrid_search, now
+from ..embed import get_embedder
 from ..ingest.runner import ingest_all
 from ..ado import AdoClient, AdoError, empty_snapshot
 from . import state as live
@@ -28,6 +30,10 @@ STREAM_EVERY_S = 2.5
 STATE_TTL_S = 2.0
 ADO_REFRESH_S = 5 * 60
 
+# Set by the CLI-owned Uvicorn server before it begins graceful shutdown.  SSE
+# clients use this to leave their generators promptly instead of holding it up.
+_shutdown_event = threading.Event()
+
 
 def _rows(sql, params=()):
     with connection() as conn:
@@ -35,14 +41,24 @@ def _rows(sql, params=()):
 
 
 def _ingest_loop(stop: threading.Event):
+    last_ingest_error = last_embedding_error = None
     while True:
         try:
             ingest_all()
-            # Backfill is best-effort and may lazily load the local model; it never affects writes.
+        except Exception as exc:  # dashboard remains usable if one log is malformed/unreadable
+            current = (type(exc), str(exc))
+            if current != last_ingest_error:
+                log.exception("ingest pass failed")
+                last_ingest_error = current
+        try:
+            # Backfill writes only memory_embeddings; it may lazily load the local model.
             with connection() as conn:
                 ensure_embeddings(conn)
-        except Exception:  # dashboard remains usable if one log is malformed/unreadable
-            log.exception("ingest pass failed")
+        except Exception as exc:
+            current = (type(exc), str(exc))
+            if current != last_embedding_error:
+                log.exception("embedding backfill failed")
+                last_embedding_error = current
         if stop.wait(INGEST_EVERY_S):
             return
 
@@ -74,6 +90,7 @@ class AdoCache:
         self.on_waiting_added = on_waiting_added
         self.lock = threading.Lock()
         self.value: dict | None = None
+        self.had_successful_refresh = False
 
     @staticmethod
     def _waiting_ids(snapshot: dict | None) -> set[int | str]:
@@ -84,33 +101,41 @@ class AdoCache:
 
     def get(self) -> dict:
         with self.lock:
-            return copy.deepcopy(self.value) if self.value is not None else empty_snapshot()
+            if self.value is not None:
+                return copy.deepcopy(self.value)
+        # Do not retain or display the token; its presence alone controls this state.
+        snapshot = empty_snapshot(configured=self.client.configured())
+        snapshot["pending"] = True
+        return snapshot
 
     def refresh(self) -> dict:
         try:
             fresh = self.client.snapshot()
-        except AdoError:
-            # The client intentionally exposes only credential-safe messages.
+        except AdoError as exc:
+            log.warning("Azure DevOps refresh failed: %s", exc)
             with self.lock:
-                previous = copy.deepcopy(self.value) if self.value is not None else empty_snapshot(configured=True)
+                previous = copy.deepcopy(self.value) if self.value is not None else empty_snapshot(configured=self.client.configured())
                 previous["stale"] = True
-                previous["error"] = "Azure DevOps refresh failed"
+                previous["pending"] = False
+                previous["error"] = str(exc)
                 self.value = previous
                 return copy.deepcopy(previous)
-        except Exception:
-            # Same safety rule for an unexpected local parsing failure.
+        except Exception as exc:
+            log.error("Unexpected Azure DevOps refresh error (%s)", type(exc).__name__, exc_info=True)
             with self.lock:
-                previous = copy.deepcopy(self.value) if self.value is not None else empty_snapshot(configured=True)
+                previous = copy.deepcopy(self.value) if self.value is not None else empty_snapshot(configured=self.client.configured())
                 previous["stale"] = True
-                previous["error"] = "Azure DevOps refresh failed"
+                previous["pending"] = False
+                previous["error"] = f"unexpected error ({type(exc).__name__})"
                 self.value = previous
                 return copy.deepcopy(previous)
 
         with self.lock:
-            had_previous = self.value is not None
+            had_successful_refresh = self.had_successful_refresh
             old_ids = self._waiting_ids(self.value)
             self.value = fresh
-            added = self._waiting_ids(fresh) - old_ids if had_previous else set()
+            self.had_successful_refresh = True
+            added = self._waiting_ids(fresh) - old_ids if had_successful_refresh else set()
             result = copy.deepcopy(fresh)
         # Initial data does not create a synthetic alert; later refreshes do.
         if added and self.on_waiting_added:
@@ -166,6 +191,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="devmem", lifespan=lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
 
@@ -192,14 +218,27 @@ def _pulses(since: dict) -> tuple[list, dict]:
 
 @app.get("/api/stream")
 async def api_stream(request: Request):
+    async def wait_for_next_update() -> bool:
+        """Wait in short slices so server shutdown does not wait for an SSE client."""
+        remaining = STREAM_EVERY_S
+        while remaining > 0:
+            if _shutdown_event.is_set() or await request.is_disconnected():
+                return False
+            pause = min(0.5, remaining)
+            started = time.monotonic()
+            await asyncio.sleep(pause)
+            remaining -= time.monotonic() - started
+        return not _shutdown_event.is_set() and not await request.is_disconnected()
+
     async def events():
         snapshot = await asyncio.to_thread(_cache.get)
         since = dict(snapshot["cursor"])  # no replay of history: pulses start from now
         ado_cursor = _ado_pulses.since(0)[1]
         sent_sig = snapshot["graph_sig"]
         yield "retry: 3000\n\n" + _sse("state", snapshot)
-        while not await request.is_disconnected():
-            await asyncio.sleep(STREAM_EVERY_S)
+        while not _shutdown_event.is_set() and not await request.is_disconnected():
+            if not await wait_for_next_update():
+                return
             try:
                 pulses, since = await asyncio.to_thread(_pulses, since)
                 snapshot = await asyncio.to_thread(_cache.get)
@@ -310,16 +349,29 @@ def agents(request: Request):
 
 @app.get("/memory")
 def memory(request: Request, q: str = "", kind: str = ""):
+    embedder_status = None
     if q and fts_query(q):
         with connection() as conn:
-            rows = hybrid_search(conn, q, where_sql="1=1", kind=kind or None, limit=200)
+            matches = hybrid_search(conn, q, where_sql="1=1", kind=kind or None, limit=200)
+            ids = [match["id"] for match in matches]
+            full_rows = conn.execute(
+                f"SELECT * FROM memories WHERE id IN ({','.join('?' for _ in ids)})", ids
+            ).fetchall() if ids else []
+            by_id = {row["id"]: dict(row) for row in full_rows}
+            # Hydrate fields used by the edit form without changing hybrid search's
+            # compact public/MCP projection, and retain its rank and annotations.
+            rows = [{**by_id[match["id"]], "match": match["match"], "snippet": match.get("snippet")}
+                    for match in matches if match["id"] in by_id]
+        status = getattr(get_embedder(), "status", lambda: {})()
+        if status and (not status.get("enabled") or status.get("last_error")):
+            embedder_status = status
     else:
         sql, params = "SELECT * FROM memories", []
         if kind:
             sql += " WHERE kind=?"
             params.append(kind)
         rows = _rows(sql + " ORDER BY updated_at DESC LIMIT 200", params)
-    return render(request, "memory.html", rows=rows, q=q, kind=kind,
+    return render(request, "memory.html", rows=rows, q=q, kind=kind, embedder_status=embedder_status,
                   counts=_rows("SELECT kind,COUNT(*) count FROM memories GROUP BY kind"))
 
 

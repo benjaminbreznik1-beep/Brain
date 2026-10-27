@@ -17,9 +17,10 @@ FAILURE_BACKOFF_S = 10 * 60
 
 
 class Embedder(Protocol):
-    """Small interface deliberately easy to replace in offline tests."""
+    """Small interface deliberately easy to replace in tests without the optional runtime."""
 
     def embed(self, texts: Sequence[str], *, query: bool = False) -> np.ndarray | None: ...
+    def status(self) -> dict[str, object]: ...
 
 
 class FastEmbedder:
@@ -33,6 +34,7 @@ class FastEmbedder:
         self._last_use = 0.0
         self._disabled_until = 0.0
         self._unload_timer: threading.Timer | None = None
+        self.last_error: str | None = None
 
     def _fail(self, exc: Exception) -> None:
         if self._unload_timer is not None:
@@ -40,7 +42,14 @@ class FastEmbedder:
             self._unload_timer = None
         self._model = None
         self._disabled_until = time.monotonic() + FAILURE_BACKOFF_S
-        print(f"devmem: embeddings unavailable for 10 minutes ({type(exc).__name__})", file=sys.stderr)
+        self.last_error = f"{type(exc).__name__}: {exc}"[:200]
+        print(f"devmem: embeddings unavailable for {FAILURE_BACKOFF_S // 60} minutes: {self.last_error}", file=sys.stderr)
+
+    def status(self) -> dict[str, object]:
+        enabled = os.environ.get("DEVMEM_EMBED") != "0"
+        return {"enabled": enabled, "loaded": self._model is not None,
+                "disabled_until": self._disabled_until, "last_error": self.last_error or
+                ("disabled by DEVMEM_EMBED=0" if not enabled else None)}
 
     def _schedule_unload(self) -> None:
         if self._unload_timer is not None:
@@ -66,7 +75,7 @@ class FastEmbedder:
                 if self._model is not None and time.monotonic() - self._last_use >= IDLE_UNLOAD_S:
                     self._model = None
                 if self._model is None:
-                    # Importing fastembed itself can fail when its optional runtime is unavailable.
+                    # Importing fastembed itself can fail when its optional acceleration is unavailable.
                     from fastembed import TextEmbedding
                     self.cache_dir.mkdir(parents=True, exist_ok=True)
                     self._model = TextEmbedding(self.model, cache_dir=str(self.cache_dir))
@@ -75,9 +84,10 @@ class FastEmbedder:
                 if vectors.ndim != 2 or vectors.shape != (len(texts), EMBEDDING_DIM):
                     raise ValueError("embedding model returned unexpected vector shape")
                 self._last_use = time.monotonic()
+                self.last_error = None
                 self._schedule_unload()
                 return vectors
-            except Exception as exc:  # Embeddings are an optional local acceleration, never a request failure.
+            except Exception as exc:  # Embeddings are an optional runtime, never a request failure.
                 self._fail(exc)
                 return None
 

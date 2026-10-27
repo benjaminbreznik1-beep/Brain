@@ -5,7 +5,8 @@ import json
 import os
 import sys
 
-from .db import context_text, connection, db_path, ensure_embeddings, fts_query, project_for_cwd, readonly_connection
+from .db import context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, project_for_cwd, readonly_connection
+from .embed import get_embedder
 
 
 _NO_CONTEXT = "No saved project context."
@@ -51,10 +52,23 @@ def main() -> None:
                 total += result["embedded"]
                 if not result["embedded"]:
                     print(f"Embedded {total} memories; {result['pending']} pending.")
+                    if result["pending"]:
+                        status = getattr(get_embedder(), "status", lambda: {})()
+                        print(f"devmem embed: {status.get('last_error') or 'embedder unavailable'}", file=sys.stderr)
+                        raise SystemExit(1)
                     break
     elif args.command == "panel":
         import uvicorn
-        uvicorn.run("devmem.panel.app:app", host="127.0.0.1", port=args.port)
+        from .panel.app import _shutdown_event, app
+
+        class PanelServer(uvicorn.Server):
+            def handle_exit(self, sig, frame):
+                _shutdown_event.set()
+                super().handle_exit(sig, frame)
+
+        _shutdown_event.clear()
+        config = uvicorn.Config(app, host="127.0.0.1", port=args.port, timeout_graceful_shutdown=2)
+        PanelServer(config).run()
     elif args.command == "context":
         try:
             if not db_path().is_file():
@@ -72,7 +86,7 @@ def main() -> None:
     else:
         if not fts_query(args.q): return
         with connection() as conn:
-            rows=conn.execute("SELECT m.id,m.title,m.kind,m.project,m.updated_at,snippet(memories_fts,1,'[',']','…',16) snippet FROM memories_fts JOIN memories m ON m.id=memories_fts.rowid WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) LIMIT ?",(fts_query(args.q),args.limit)).fetchall()
+            rows = hybrid_search(conn, args.q, where_sql="1=1", limit=args.limit)
         for r in rows: print(f"{r['id']} [{r['kind']}] {r['title']} — {r['snippet']}")
 
 if __name__ == "__main__": main()

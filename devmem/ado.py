@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+import socket
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -37,7 +38,7 @@ class AdoError(RuntimeError):
 
 
 class AdoForbidden(AdoError):
-    """Raised before network access for a method or URL outside the allowlist."""
+    """Raised without network I/O for a method, origin, path, or body outside the allowlist."""
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -81,6 +82,7 @@ def empty_snapshot(configured: bool = False) -> dict[str, Any]:
     """The stable public shape used before the first successful refresh too."""
     return {
         "configured": configured,
+        "pending": False,
         "refreshed_at": None,
         "stale": False,
         "error": None,
@@ -100,6 +102,10 @@ class AdoClient:
 
     def __init__(self, token_loader: Callable[[], str | None] = _read_token):
         self._token_loader = token_loader
+
+    def configured(self) -> bool:
+        """Whether a token is present, without retaining or exposing it."""
+        return bool(self._token_loader())
 
     def _request(self, method: str, url: str, body: bytes | None = None) -> dict[str, Any]:
         """Validate first, then make one authenticated request with no redirects."""
@@ -133,10 +139,29 @@ class AdoClient:
         request = Request(url, data=body, headers=headers, method=method)
         try:
             with _OPENER.open(request, timeout=TIMEOUT_S) as response:
+                status = getattr(response, "status", None)
+                getcode = getattr(response, "getcode", None)
+                if status is None and getcode:
+                    status = getcode()
+                content_type = getattr(response, "headers", {}).get("Content-Type", "")
+                if status == 203 and "html" in content_type.lower():
+                    raise AdoError("HTTP 203 — token expired or missing scope?")
                 return json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError):
-            # Do not use str(exc): an upstream error can contain echoed request data.
-            raise AdoError("Azure DevOps request failed") from None
+        except HTTPError as exc:
+            message = f"HTTP {exc.code}"
+            if exc.code in (203, 401, 403):
+                message += " — token expired or missing scope?"
+            raise AdoError(message) from None
+        except (TimeoutError, socket.timeout):
+            raise AdoError("timeout") from None
+        except URLError as exc:
+            if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+                raise AdoError("timeout") from None
+            raise AdoError(f"network error ({type(exc).__name__})") from None
+        except OSError as exc:
+            raise AdoError(f"network error ({type(exc).__name__})") from None
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            raise AdoError("invalid JSON") from None
 
     @staticmethod
     def _url(path: str, **query: Any) -> str:

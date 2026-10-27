@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import atexit
+import errno
 import json
 import os
+import socket
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -29,6 +31,16 @@ class _PanelNoRedirect(HTTPRedirectHandler):
 _PANEL_OPENER = build_opener(ProxyHandler({}), _PanelNoRedirect())
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    return isinstance(reason, (TimeoutError, socket.timeout))
+
+
+def _is_connection_refused(exc: URLError) -> bool:
+    reason = exc.reason
+    return isinstance(reason, ConnectionRefusedError) or getattr(reason, "errno", None) == errno.ECONNREFUSED
+
+
 def _panel_urls() -> tuple[str, str]:
     """Return the only panel URLs this process is permitted to request."""
     raw_port = os.environ.get("DEVMEM_PANEL_PORT", "8765")
@@ -45,6 +57,7 @@ def _panel_urls() -> tuple[str, str]:
 def _panel_snapshot(refresh: bool) -> dict[str, Any]:
     """Read the panel-owned ADO cache without following any redirect."""
     api_url, refresh_url = _panel_urls()
+    refresh_timed_out = False
     if refresh:
         try:
             with _PANEL_OPENER.open(Request(refresh_url, method="POST"), timeout=20) as response:
@@ -52,17 +65,26 @@ def _panel_snapshot(refresh: bool) -> dict[str, Any]:
                 status = getattr(response, "status", None)
                 if status is None:
                     status = response.getcode()
-                if status not in (200, 201, 202, 204, 303):
+                if status not in (200, 201, 202, 204):
                     raise OSError("panel refresh failed")
         except HTTPError as exc:
             # The panel normally returns this redirect.  It is intentionally not followed.
             if exc.code != 303:
                 raise
+        except (TimeoutError, socket.timeout):
+            refresh_timed_out = True
+        except URLError as exc:
+            if not _is_timeout(exc):
+                raise
+            refresh_timed_out = True
     with _PANEL_OPENER.open(Request(api_url, method="GET"), timeout=3) as response:
         payload = response.read().decode("utf-8")
     data = json.loads(payload)
     if not isinstance(data, dict):
         raise ValueError("panel returned an invalid snapshot")
+    if refresh_timed_out:
+        # This private marker is removed before the MCP response is produced.
+        data["_refresh_timed_out"] = True
     return data
 
 
@@ -78,6 +100,8 @@ def _ado_pr(pr: dict[str, Any], pending_reviewers: bool = False) -> dict[str, An
 
 
 def _ado_status(snapshot: dict[str, Any], section: str) -> dict[str, Any]:
+    if snapshot.get("pending"):
+        return _ado_unavailable("ADO data not loaded yet (first refresh pending)")
     if not snapshot.get("configured"):
         return _ado_unavailable("ADO not configured (no token)")
     result: dict[str, Any] = {
@@ -167,7 +191,7 @@ def memory_save(content: str, title: str | None = None, kind: str = "note", tags
     return _call("memory_save", {"title": title, "kind": kind, "scope": scope}, work, ctx)
 
 
-@mcp.tool(description="Search memory before starting non-trivial work, especially for prior decisions, conventions, and gotchas.")
+@mcp.tool(description="Search memory before starting non-trivial work, especially for prior decisions, conventions, and gotchas. Uses hybrid keyword + semantic ranking; match is keyword, semantic, or both. Semantic-only hits have plain snippets.")
 def memory_search(query: str, limit: int = 8, kind: str | None = None, scope: str = "project", ctx: Context | None = None) -> list[dict]:
     def work():
         _, project = _client(); where, params = _scope(scope, project)
@@ -218,7 +242,7 @@ def memory_list(limit: int = 20, kind: str | None = None, scope: str = "project"
     return _call("memory_list", {"limit":limit,"kind":kind,"scope":scope}, work, ctx)
 
 
-@mcp.tool(description="Get a compact current-project briefing before non-trivial work: recent decisions, preferences, and open todos.")
+@mcp.tool(description="Get a compact current-project briefing before non-trivial work: recent project decisions, preferences, todos, and notes, plus titles of global decisions and preferences (use memory_get for detail).")
 def project_context(ctx: Context | None = None) -> str:
     def work():
         _, project = _client()
@@ -227,7 +251,7 @@ def project_context(ctx: Context | None = None) -> str:
     return _call("project_context", {}, work, ctx)
 
 
-@mcp.tool(description="Read-only view of the user's Azure DevOps: PRs waiting for them, their PRs waiting on others, and their open work items. Use when asked about tasks, PRs, or what to work on.")
+@mcp.tool(description="Read-only Azure DevOps summary served from the running devmem panel's cache (5-min refresh). section: all | waiting_for_me (PRs to review, own PRs approved-not-completed or with changes requested) | waiting_on_others | tasks (open work items assigned to you in project AI). refresh=true forces a live fetch (slow). Returns available:false with a reason if the panel is down, ADO is unconfigured, or data is not loaded yet.")
 def ado_status(section: str = "all", refresh: bool = False, ctx: Context | None = None) -> dict:
     """Return a compact, token-free projection of the running panel's ADO cache."""
     def work():
@@ -235,11 +259,26 @@ def ado_status(section: str = "all", refresh: bool = False, ctx: Context | None 
             raise ValueError("section must be all, waiting_for_me, waiting_on_others, or tasks")
         try:
             snapshot = _panel_snapshot(refresh)
-        except (HTTPError, URLError, OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-            # Do not expose upstream messages; they can include arbitrary response data.
+        except HTTPError as exc:
+            if exc.code != 303:
+                return _ado_unavailable(f"panel returned HTTP {exc.code}")
+            return _ado_unavailable("panel refresh redirected unexpectedly")
+        except URLError as exc:
             port = _panel_urls()[0].rsplit(":", 1)[1].split("/", 1)[0]
-            return _ado_unavailable(f"devmem panel not running on 127.0.0.1:{port}")
-        return _ado_status(snapshot, section)
+            if _is_connection_refused(exc):
+                return _ado_unavailable(f"devmem panel not running on 127.0.0.1:{port}")
+            if _is_timeout(exc):
+                return _ado_unavailable("panel request timed out")
+            return _ado_unavailable(f"panel request failed ({type(exc.reason).__name__})")
+        except (TimeoutError, socket.timeout):
+            return _ado_unavailable("panel request timed out")
+        except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return _ado_unavailable("panel returned an invalid snapshot")
+        refresh_timed_out = bool(snapshot.pop("_refresh_timed_out", False))
+        result = _ado_status(snapshot, section)
+        if refresh_timed_out:
+            result["note"] = "refresh timed out; showing cached data"
+        return result
     return _call("ado_status", {"section": section, "refresh": refresh}, work, ctx)
 
 

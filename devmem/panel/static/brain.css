@@ -1,6 +1,7 @@
 /* Brain wall: full-viewport, no page scroll at 1920x1080 or 1366x768. */
 body.wall-page {
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -192,6 +193,7 @@ main.wall {
 .ado-card-counts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35em 0.8em; color: var(--muted); font-size: 0.82em; }
 .ado-card-counts:hover { text-decoration: none; color: var(--text); }
 .ado-card-counts b { color: var(--cyan); font-size: 1.25em; font-variant-numeric: tabular-nums; margin-right: 0.2em; }
+.ado-card-stale { color: var(--amber); font-size: 0.62em; vertical-align: middle; }
 
 /* ---------- brain ---------- */
 .col-centre { min-width: 0; }
@@ -369,6 +371,77 @@ main.wall {
   main.wall { grid-template-columns: 1fr; }
   .brain-wrap { min-height: 60vh; }
   .panel-tokens { grid-template-columns: 1fr 1fr; height: auto; }
+}
+
+/* A square wall needs the graph's width more than it needs sidebars.  Keep the
+   graph above a compact, fixed three-by-two card matrix so the page itself
+   never has to scroll.  This follows the narrow-width fallback deliberately. */
+@media (max-aspect-ratio: 5 / 4) {
+  body.wall-page {
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    font-size: clamp(11px, 1.25vh, 20px);
+  }
+
+  main.wall {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 52fr) minmax(0, 24fr) minmax(0, 24fr);
+    gap: clamp(6px, 0.8vh, 18px);
+    padding: clamp(6px, 0.8vh, 18px);
+    overflow: hidden;
+  }
+
+  /* Let the original column children become cells in the wall grid. */
+  .wall .col { display: contents; }
+
+  .brain-wrap {
+    grid-column: 1 / -1;
+    grid-row: 1;
+    min-height: 0;
+  }
+
+  .col-left .panel-limits { grid-column: 1; grid-row: 2; }
+  .col-left .panel-memory { grid-column: 2; grid-row: 2; }
+  .col-left .panel-ado { grid-column: 3; grid-row: 2; }
+  .col-centre .panel-tokens { grid-column: 1; grid-row: 3; }
+  .col-right .panel-agents { grid-column: 2; grid-row: 3; }
+  .col-right .panel-feed { grid-column: 3; grid-row: 3; }
+
+  .wall .panel {
+    height: 100%;
+    box-sizing: border-box;
+    padding: clamp(7px, 0.9vh, 18px) clamp(8px, 0.9vw, 20px);
+  }
+
+  .panel h3 { margin-bottom: clamp(0.3em, 0.55vh, 0.6em); letter-spacing: 0.11em; }
+
+  .gauge svg { max-height: clamp(78px, 10.5vh, 220px); }
+  .gauge .g-asof { font-size: 0.72em; }
+
+  .panel-memory { display: flex; flex-direction: column; }
+  .panel-memory .kinds { overflow: auto; min-height: 0; }
+
+  .panel-tokens {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    gap: clamp(5px, 0.7vh, 14px) clamp(7px, 0.8vw, 16px);
+    height: 100%;
+  }
+  .panel-tokens .tok-block { overflow: hidden; }
+  .tok-big { font-size: clamp(1.45em, 2.5vh, 2.3em); }
+  .tok-split { margin-top: 0.25em; gap: 0.12em; font-size: 0.8em; }
+  .tok-models h3 .seg-legend { display: none; }
+  .tok-models ul { overflow: auto; gap: 0.25em; }
+  .tok-models li { font-size: 0.78em; }
+
+  .panel-agents { max-height: none; display: flex; flex-direction: column; }
+  .panel-agents .agents { overflow: auto; min-height: 0; gap: 0.3em; }
+  .panel-agents .agent { gap: 0.1em 0.45em; }
+  .panel-agents .a-last { font-size: 0.8em; }
+
+  .panel-feed .feed { overflow: auto; }
+  .panel-feed .feed li { padding: clamp(0.2em, 0.35vh, 0.42em) 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

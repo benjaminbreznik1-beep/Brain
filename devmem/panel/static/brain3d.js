@@ -1,6 +1,6 @@
 // devmem 3D brain: a glowing neural web on 3d-force-graph (WebGL / three.js).
 //
-// The pinned 3d-force-graph bundle does not expose THREE, so the few three.js classes needed for
+// The pinned 3d-force-graph bundle does not expose THREE. Its second three.js copy must stay coupled to r162, so the few classes needed for
 // canvas-texture sprites (labels, glow halos) are taken from objects the library itself creates:
 // a probe node's default mesh and the post-processing composer's render target.  If that fails the web
 // still renders with the library's default spheres and hover tooltips.
@@ -50,8 +50,9 @@
 
     function resizeBloom(width, height) {
       if (!bloomPass || !bloomPass.setSize) return;
-      // Keep the composer's full canvas target, but make the bloom buffers half-resolution.
-      bloomPass.setSize(Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2)));
+      // UnrealBloomPass halves internally; pass CSS canvas size times renderer pixel ratio for real half-resolution bloom.
+      var ratio = Graph.renderer && Graph.renderer().getPixelRatio ? Graph.renderer().getPixelRatio() : window.devicePixelRatio || 1;
+      bloomPass.setSize(Math.max(1, Math.ceil(width * ratio)), Math.max(1, Math.ceil(height * ratio)));
     }
 
     function ensureBloom() {
@@ -398,7 +399,6 @@
           link("__brain__", n.id, "hp", "#6d5fd6");
         }
       });
-      // mark structural changes on reused objects (colour/size of an existing agent etc.)
       nodes = next; nodeById = byId; links = nextLinks; linkByKey = nextKeys;
       syncHalos();
       Graph.graphData({ nodes: nodes, links: links });

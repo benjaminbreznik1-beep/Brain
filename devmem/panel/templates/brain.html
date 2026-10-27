@@ -27,7 +27,7 @@
       <div class="kinds" id="kinds"></div>
     </div>
     <section class="panel panel-ado" id="ado-card" hidden>
-      <h3><a href="/ado">ADO</a></h3>
+      <h3 id="ado-heading"><a href="/ado">ADO</a></h3>
       <a class="ado-card-counts" id="ado-counts" href="/ado" aria-label="Open Azure DevOps summary"></a>
     </section>
   </section>
@@ -86,11 +86,11 @@
 </main>
 {% endblock %}
 {% block scripts %}
-  <!-- If the 3D graph loader fails, the page falls back to the 2D canvas brain. -->
+  <!-- Two CDN loads: 3d-force-graph 1.73.3 and three 0.162.0 bloom; bloom failure only disables glow. -->
   <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.3/dist/3d-force-graph.min.js" crossorigin="anonymous"></script>
   <script src="/static/brain3d.js"></script>
   <script type="module">
-    // Dynamic import so a load failure is reported (static imports fail silently).
+    // Dynamic import so a load failure can be caught and signalled to brain3d.js.
     import("https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/postprocessing/UnrealBloomPass.js/+esm")
       .then(function (m) { window.__devmemBloom = m.UnrealBloomPass; window.dispatchEvent(new Event("devmem-bloom")); })
       .catch(function (e) { window.__devmemBloomError = "bloom module failed to load: " + ((e && e.message) || e); window.dispatchEvent(new Event("devmem-bloom-failed")); });

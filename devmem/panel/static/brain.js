@@ -169,6 +169,14 @@
     var card = $("ado-card");
     if (!snapshot || !snapshot.configured) { card.hidden = true; return; }
     card.hidden = false;
+    var heading = $("ado-heading");
+    if (snapshot.stale) {
+      heading.innerHTML = '<a href="/ado">ADO</a> <span class="badge ado-card-stale">stale</span>';
+      card.title = (snapshot.error || "ADO data is stale") + "; last refresh: " + (snapshot.refreshed_at || "unknown");
+    } else {
+      heading.innerHTML = '<a href="/ado">ADO</a>';
+      card.title = "";
+    }
     var count = function (name) { return (snapshot[name] || []).length; };
     $("ado-counts").innerHTML =
       '<span><b>' + count("to_review") + '</b> to review</span>' +
@@ -181,7 +189,7 @@
   function refreshAdoCard() {
     fetch("/api/ado").then(function (response) {
       return response.ok ? response.json() : null;
-    }).then(renderAdoCard).catch(function () { /* the live wall remains usable */ });
+    }).then(renderAdoCard).catch(function (e) { console.warn("devmem: /api/ado failed", e); });
   }
 
   // ------------------------------------------------------------------ tokens
@@ -707,7 +715,7 @@
       }
       ctx.globalAlpha = 1;
 
-      // devmem hub
+      // Brain hub
       var hub = nodeById.__brain__;
       if (hub && hub.x !== undefined) {
         var hf = flashes[hub.id] ? (now - flashes[hub.id]) / 1400 : 1;
