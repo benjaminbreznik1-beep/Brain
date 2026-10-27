@@ -104,7 +104,23 @@ def _ado_status(snapshot: dict[str, Any], section: str) -> dict[str, Any]:
     if snapshot.get("pending"):
         return _ado_unavailable("ADO data not loaded yet (first refresh pending)")
     if not snapshot.get("configured"):
-        return _ado_unavailable("ADO not configured (no token)")
+        missing = snapshot.get("missing")
+        reasons = []
+        if snapshot.get("config_error"):
+            reasons.append("ADO config error: " + str(snapshot["config_error"]))
+        if snapshot.get("token_error"):
+            reasons.append("ADO token error: " + str(snapshot["token_error"]))
+        if isinstance(missing, list):
+            labels = []
+            if "token" in missing: labels.append("token")
+            if "config" in missing: labels.append("organization/project")
+            if labels:
+                reasons.append("ADO not configured (missing " + " and ".join(labels) + ")")
+        if snapshot.get("error"):
+            reasons.append("ADO error: " + str(snapshot["error"]))
+        if reasons:
+            return _ado_unavailable("; ".join(reasons))
+        return _ado_unavailable("ADO not configured (missing token or organization/project; see README 'Azure DevOps')")
     result: dict[str, Any] = {
         "available": True,
         "refreshed_at": snapshot.get("refreshed_at"),
@@ -331,7 +347,7 @@ def project_context(ctx: Context | None = None) -> str:
     return _call("project_context", {}, work, ctx)
 
 
-@mcp.tool(description="Read-only Azure DevOps summary served from the running devmem panel's cache (5-min refresh). section: all | waiting_for_me (PRs to review, own PRs approved-not-completed or with changes requested) | waiting_on_others | tasks (open work items assigned to you in project AI). refresh=true forces a live fetch (slow). Returns available:false with a reason if the panel is down, ADO is unconfigured, or data is not loaded yet.")
+@mcp.tool(description="Read-only Azure DevOps summary served from the running devmem panel's cache (5-min refresh). section: all | waiting_for_me (PRs to review, own PRs approved-not-completed or with changes requested) | waiting_on_others | tasks (open work items assigned to you in the configured project). refresh=true forces a live fetch (slow). Returns available:false with a reason if the panel is down, ADO is unconfigured, or data is not loaded yet.")
 def ado_status(section: str = "all", refresh: bool = False, ctx: Context | None = None) -> dict:
     """Return a compact, token-free projection of the running panel's ADO cache."""
     def work():

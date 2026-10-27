@@ -16,7 +16,7 @@ _REMINDER_RULES = (
     (r"\bgit\s+(switch\s+-c|checkout\s+-b)\b", "New branch started: if this belongs to a tracked task, update its status line in memory (the pinned board and the task's own memory)."),
     (r"\bgit\s+commit\b", "Commit made: update the task's status in memory (pinned board + task memory) if its phase changed."),
     (r"\bgit\s+merge\b", "Merge done: mark the task's phase in memory (pinned board + task memory)."),
-    (r"run-codex-tasks\.sh|codex\s+exec", "Work dispatched to Codex: record 'dispatched' in the task's memory now and update it again when the result comes back."),
+    (r"\bcodex\s+exec\b", "Work dispatched to Codex: record 'dispatched' in the task's memory now and update it again when the result comes back."),
 )
 
 

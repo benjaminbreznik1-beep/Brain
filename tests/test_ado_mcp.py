@@ -43,7 +43,7 @@ class _PanelOpener:
 
 def _snapshot():
     raw_prs = json.loads((Path(__file__).parent / "fixtures" / "ado_prs.json").read_text())
-    classified = ado.AdoClient._classify_prs(raw_prs, "me-id")
+    classified = ado.AdoClient(lambda: "test-token", lambda: (("example-org", "ExampleProject"), None))._classify_prs(raw_prs, "me-id", "example-org", "ExampleProject")
     tasks = [
         {"id": 20, "title": "Queued", "type": "Task", "state": "New", "url": "work/20"},
         {"id": 3, "title": "Active", "type": "Bug", "state": "In Progress", "url": "work/3"},
@@ -58,7 +58,7 @@ def _snapshot():
 
 def test_status_shapes_fixture_snapshot_and_filters_sections():
     all_status = mcp_server._ado_status(_snapshot(), "all")
-    assert all_status["waiting_for_me"]["to_review"][0]["id"] == 101
+    assert all_status["waiting_for_me"]["to_review"][0]["id"] == 1001
     assert all_status["waiting_on_others"][0]["pending_reviewers"] == ["Reviewer C"]
     assert [task["id"] for task in all_status["tasks"]] == [2, 3, 20]
     assert all_status["tasks_by_state"] == {"New": 1, "In Progress": 2}
@@ -119,7 +119,13 @@ def test_panel_down_and_not_configured_are_safe_unavailable_results(monkeypatch)
     down = mcp_server.ado_status()
     assert down == {"available": False, "reason": "devmem panel not running on 127.0.0.1:8765"}
     assert mcp_server._ado_status({"configured": False}, "all") == {
-        "available": False, "reason": "ADO not configured (no token)"
+        "available": False, "reason": "ADO not configured (missing token or organization/project; see README 'Azure DevOps')"
+    }
+    assert mcp_server._ado_status({"configured": False, "config_error": "bad json"}, "all") == {
+        "available": False, "reason": "ADO config error: bad json"
+    }
+    assert mcp_server._ado_status({"configured": False, "missing": ["token", "config"]}, "all") == {
+        "available": False, "reason": "ADO not configured (missing token and organization/project)"
     }
 
 
@@ -174,3 +180,10 @@ def test_memory_search_scopes_use_real_scope_sql_with_semantic_results(tmp_path,
         assert {row["id"] for row in mcp_server.memory_search("needle", scope="all")} == set(ids.values())
     finally:
         set_embedder(None)
+
+
+def test_ado_status_reports_token_and_refresh_errors():
+    token = mcp_server._ado_status({"configured": False, "token_error": "ado_token: not UTF-8 text", "missing": []}, "all")
+    assert token["available"] is False and "ADO token error: ado_token: not UTF-8 text" in token["reason"]
+    failed = mcp_server._ado_status({"configured": False, "error": "HTTP 404 — check organization/project in the ADO config", "missing": []}, "all")
+    assert "ADO error: HTTP 404" in failed["reason"]

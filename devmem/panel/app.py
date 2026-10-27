@@ -85,7 +85,7 @@ class AdoPulseQueue:
 
 
 class AdoCache:
-    """Last-good snapshot cache; failures never replace useful ADO data."""
+    """ADO snapshot cache; unconfigured states reset the change baseline."""
 
     def __init__(self, client: AdoClient | None = None, on_waiting_added=None):
         self.client = client or AdoClient()
@@ -95,6 +95,9 @@ class AdoCache:
         self.had_successful_refresh = False
         self.changes: list[dict] = []
         self.change_seq = 0
+        self.last_config_error: str | None = None
+        self.last_token_error: str | None = None
+        self.configured_failure_types: set[type[BaseException]] = set()
         # The journal lives in memory; a new id per panel run tells browsers their seen seq is from an older run.
         self.journal_id = secrets.token_hex(4)
 
@@ -142,39 +145,62 @@ class AdoCache:
         with self.lock:
             return self.change_seq, [copy.deepcopy(change) for change in reversed(self.changes) if change["seq"] > since]
 
+    def _configured(self) -> tuple[bool, str | None]:
+        try:
+            return bool(self.client.configured()), None
+        except Exception as exc:
+            if type(exc) not in self.configured_failure_types:
+                log.exception("Azure DevOps configuration check failed (%s)", type(exc).__name__)
+                self.configured_failure_types.add(type(exc))
+            return False, f"configuration check failed ({type(exc).__name__})"
+
     def get(self) -> dict:
         with self.lock:
             if self.value is not None:
                 return copy.deepcopy(self.value)
-        # Do not retain or display the token; its presence alone controls this state.
-        snapshot = empty_snapshot(configured=self.client.configured())
+        # Do not retain or display credentials; a token and valid names control this state.
+        configured, config_error = self._configured()
+        snapshot = empty_snapshot(configured=configured, config_error=config_error)
         snapshot["pending"] = True
         return snapshot
 
     def refresh(self) -> dict:
         try:
+            return self._refresh()
+        except Exception as exc:
+            log.error("Unexpected Azure DevOps refresh error (%s)", type(exc).__name__, exc_info=True)
+            self.unexpected_loop_error(exc)
+            with self.lock:
+                return copy.deepcopy(self.value)
+
+    def _refresh(self) -> dict:
+        try:
             fresh = self.client.snapshot()
         except AdoError as exc:
             log.warning("Azure DevOps refresh failed: %s", exc)
             with self.lock:
-                previous = copy.deepcopy(self.value) if self.value is not None else empty_snapshot(configured=self.client.configured())
-                previous["stale"] = True
-                previous["pending"] = False
-                previous["error"] = str(exc)
-                self.value = previous
-                return copy.deepcopy(previous)
+                return self._failed(str(exc))
         except Exception as exc:
             log.error("Unexpected Azure DevOps refresh error (%s)", type(exc).__name__, exc_info=True)
             with self.lock:
-                previous = copy.deepcopy(self.value) if self.value is not None else empty_snapshot(configured=self.client.configured())
-                previous["stale"] = True
-                previous["pending"] = False
-                previous["error"] = f"unexpected error ({type(exc).__name__})"
-                self.value = previous
-                return copy.deepcopy(previous)
+                return self._failed(f"unexpected error ({type(exc).__name__})")
+
+        reason = fresh.get("config_error")
+        if reason and reason != self.last_config_error:
+            log.warning("Azure DevOps config problem: %s", reason)
+        self.last_config_error = reason
+        token_error = fresh.get("token_error")
+        if token_error and token_error != self.last_token_error:
+            log.warning("Azure DevOps token problem: %s", token_error)
+        self.last_token_error = token_error
 
         with self.lock:
-            had_successful_refresh = self.had_successful_refresh
+            if reason or not fresh.get("configured"):
+                self.value = fresh
+                self.had_successful_refresh = False
+                return copy.deepcopy(fresh)
+            # A different organization/project is new data, not a change: start a fresh baseline.
+            had_successful_refresh = self.had_successful_refresh and (self.value or {}).get("scope") == fresh.get("scope")
             previous = self.value
             old_ids = self._waiting_ids(self.value)
             self.value = fresh
@@ -187,11 +213,29 @@ class AdoCache:
                 self.changes = self.changes[-100:]
             added = self._waiting_ids(fresh) - old_ids if had_successful_refresh else set()
             result = copy.deepcopy(fresh)
-        # Initial data does not create a synthetic alert; later refreshes do.
+        # Initial data after startup or an unconfigured interval creates no alert.
         if added and self.on_waiting_added:
             for pr_id in added:
                 self.on_waiting_added({"type": "ado", "id": pr_id})
         return result
+
+    def _failed(self, error: str) -> dict:
+        """Keep the last configured data marked stale; never re-show an old 'not configured' state."""
+        if self.value is not None and self.value.get("configured"):
+            snapshot = copy.deepcopy(self.value)
+        else:
+            # snapshot() only fails once a token and config exist, so the error is the news here.
+            configured, config_error = self._configured()
+            snapshot = empty_snapshot(configured=configured, config_error=config_error)
+        snapshot["stale"] = True
+        snapshot["pending"] = False
+        snapshot["error"] = error
+        self.value = snapshot
+        return copy.deepcopy(snapshot)
+
+    def unexpected_loop_error(self, exc: BaseException) -> None:
+        with self.lock:
+            self._failed(f"unexpected refresh loop error ({type(exc).__name__})")
 
 
 _ado_pulses = AdoPulseQueue()
@@ -200,7 +244,12 @@ _ado_cache = AdoCache(on_waiting_added=_ado_pulses.emit)
 
 def _ado_loop(stop: threading.Event):
     while True:
-        _ado_cache.refresh()
+        try:
+            _ado_cache.refresh()
+        except Exception as exc:
+            log.exception("Azure DevOps refresh loop error")
+            if hasattr(_ado_cache, "unexpected_loop_error"):
+                _ado_cache.unexpected_loop_error(exc)
         if stop.wait(ADO_REFRESH_S):
             return
 

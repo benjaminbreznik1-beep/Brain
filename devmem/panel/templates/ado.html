@@ -7,7 +7,7 @@
   <div class="card muted">Loading…</div>
 {% elif not snapshot.configured %}
   <h1>Azure DevOps</h1>
-  <div class="card muted">Azure DevOps is not configured: <span class="mono">~/.devmem/ado_token</span> is missing or empty.</div>
+  <div class="card muted">{% if snapshot.config_error %}Azure DevOps config problem: {{ snapshot.config_error }}{% endif %}{% if snapshot.token_error %}{% if snapshot.config_error %} · {% endif %}Azure DevOps token problem: {{ snapshot.token_error }}{% endif %}{% if snapshot.missing %}{% if snapshot.config_error or snapshot.token_error %} · {% endif %}Azure DevOps is not configured: {% if 'token' in snapshot.missing %}no token in ~/.devmem/ado_token{% endif %}{% if 'token' in snapshot.missing and 'config' in snapshot.missing %} and {% endif %}{% if 'config' in snapshot.missing %}no organization/project: create ~/.devmem/ado.json or set DEVMEM_ADO_ORG and DEVMEM_ADO_PROJECT for the panel{% endif %}{% elif snapshot.error %}Azure DevOps error: {{ snapshot.error }}{% endif %}</div>
   <form action="/ado/refresh" method="post"><button type="submit">Refresh</button></form>
 {% else %}
   {% macro pr_list(items, empty) -%}
@@ -30,7 +30,7 @@
   <div class="page-title-row">
     <div>
       <h1>Azure DevOps</h1>
-      <p class="muted">{{ snapshot.project_active_count }} active PRs in project AI</p>
+      <p class="muted">{{ snapshot.project_active_count }} active PRs in the configured project</p>
     </div>
     <div class="ado-refresh">
       <span class="muted">Last refresh: {{ snapshot.refreshed_at or 'not yet' }}</span>

@@ -109,7 +109,7 @@ def _claude_window_minutes(label: str) -> int | None:
 
 
 def ingest_claude_limits(conn, path: Path | None = None, store: LimitStore | None = None) -> int:
-    """Read the status-line snapshot (written by ~/.claude/statusline.sh); return the number of rows inserted."""
+    """Read the status-line snapshot (written by a Claude Code status-line script); return the number of rows inserted."""
     path = path or claude_limits_path()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

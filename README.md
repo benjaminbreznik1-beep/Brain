@@ -51,7 +51,7 @@ To receive lightweight reminders after relevant shell commands, add this to Clau
 {"hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "devmem remind --hook"}]}]}}
 ```
 
-Optionally set `~/.devmem/reminders.json` (or `DEVMEM_REMINDERS`) to override the built-in rules:
+Optionally set `~/.devmem/reminders.json` (or `DEVMEM_REMINDERS`) to add your own dispatch-script patterns or other rules. A `reminders.json` replaces the defaults, so copy any defaults you want to retain: `\\bgit\\s+(switch\\s+-c|checkout\\s+-b)\\b`, `\\bgit\\s+commit\\b`, `\\bgit\\s+merge\\b`, and `\\bcodex\\s+exec\\b`.
 
 ```json
 {"rules": [{"pattern": "<python regex>", "message": "<text>"}]}
@@ -59,7 +59,15 @@ Optionally set `~/.devmem/reminders.json` (or `DEVMEM_REMINDERS`) to override th
 
 ## Azure DevOps
 
-ADO is optional and read-only. Create a PAT with **Work Items: Read** and **Code: Read**, store it in `~/.devmem/ado_token`, then run `chmod 600 ~/.devmem/ado_token`. The organization and project are currently hard-coded as `example-org` and `ExampleProject`. When the token exists, the running panel polls ADO every 5 minutes. MCP clients can call `ado_status`; it reads the panel cache, so the panel must be running (set `DEVMEM_PANEL_PORT` if it is not on the default port). The ADO tab shows a `!` for changes since it was last opened; `GET /api/ado/changes` exposes the in-memory change journal.
+ADO is optional and read-only. Create a PAT with **Work Items: Read** and **Code: Read**, store it in `~/.devmem/ado_token`, then run `chmod 600 ~/.devmem/ado_token`. Also create `~/.devmem/ado.json`, a JSON object that may contain only the string keys `organization` and `project` (either may instead come from its environment variable):
+
+```json
+{"organization": "example-org", "project": "ExampleProject"}
+```
+
+Organization and project names must start with a letter or digit. Organization names otherwise use letters, digits, and hyphens (maximum 50 characters); project names otherwise use letters, digits, spaces, `.`, `_`, and `-` (maximum 64 characters). `DEVMEM_ADO_ORG` and `DEVMEM_ADO_PROJECT` override their respective file fields and must be set in the panel's environment; the MCP server reads only the panel cache. Empty environment values count as unset. `DEVMEM_ADO_CONFIG` overrides the file path and supports `~`; if it names a missing file, that is reported as an error.
+
+The panel re-reads configuration at every refresh, so no restart is needed. ADO remains off until both a token and valid organization/project configuration exist. Broken configuration shows a safe reason on the ADO tab and through `ado_status`. When configured, the running panel polls ADO every 5 minutes. MCP clients can call `ado_status`; it reads the panel cache, so the panel must be running (set `DEVMEM_PANEL_PORT` if it is not on the default port). The ADO tab shows a `!` for changes since it was last opened; `GET /api/ado/changes` exposes the in-memory change journal.
 
 ## Network use
 
