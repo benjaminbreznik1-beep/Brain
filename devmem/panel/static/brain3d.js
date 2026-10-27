@@ -41,7 +41,7 @@
       .linkColor(function (l) { return l.color; })
       .linkDirectionalParticleColor(function (l) { return l.pcolor || "#ffffff"; })
       .linkDirectionalParticleWidth(function (l) { return l.pwidth || 1.6; })
-      .linkDirectionalParticleSpeed(function (l) { return l.kind === "am" ? 0.016 : 0.035; })
+      .linkDirectionalParticleSpeed(function (l) { return l.kind === "ah" ? 0.016 : 0.035; })
       .linkDirectionalParticleResolution(6)
       .nodeLabel(tooltip)
       .onNodeClick(function (n) {
@@ -81,8 +81,8 @@
       return n.type === "project" ? -140 : n.type === "agent" ? -60 : n.type === "hub" ? -30 : -9;
     });
     Graph.d3Force("link")
-      .distance(function (l) { return l.kind === "am" ? 85 : l.kind === "hm" ? 26 : 14 + (l.spread || 0); })
-      .strength(function (l) { return l.kind === "am" ? 0.04 : 0.55; });
+      .distance(function (l) { return l.kind === "ah" ? 85 : l.kind === "hp" ? 62 : l.kind === "hm" ? 26 : 14 + (l.spread || 0); })
+      .strength(function (l) { return l.kind === "ah" ? 0.04 : l.kind === "hp" ? 0.16 : 0.55; });
 
     // ---------------------------------------------------------------- auto-rotation, paused while the user orbits/zooms
     var controls = Graph.controls();
@@ -235,17 +235,17 @@
       var g = new C.Object3D();
       var color = n.color;
       var core = new C.Mesh(sphereGeometry(n.radius, n.type === "memory" ? 8 : 16),
-        new C.Material({ color: color, emissive: color, emissiveIntensity: n.type === "hub" ? 0.4 : 0.85, transparent: true,
-          opacity: n.type === "hub" ? 0.5 : 0.95 }));
+        new C.Material({ color: color, emissive: color, emissiveIntensity: n.type === "hub" ? 1.5 : 0.85, transparent: true,
+          opacity: n.type === "hub" ? 0.98 : 0.95 }));
       g.add(core);
-      var halo = quad(haloTexture(), color, n.radius * (n.type === "project" ? 7 : n.type === "agent" ? 9 : 6), true, n.baseGlow);
+      var halo = quad(haloTexture(), color, n.radius * (n.type === "hub" ? 10 : n.type === "project" ? 7 : n.type === "agent" ? 9 : 6), true, n.baseGlow);
       g.add(halo);
       var label = null;
-      if (n.type === "project" || n.type === "agent") {
+      if (n.type === "project" || n.type === "agent" || n.type === "hub") {
         var text = n.type === "agent" ? agentShort(n.agent) + " · " + (n.name || "") : n.name;
         if (text.length > 26) text = text.slice(0, 25) + "…";
-        label = quad(labelTexture(text, n.type === "agent" ? color : "#ede9fe"), 0xffffff, n.type === "agent" ? 5 : 6.5, false, 0.95);
-        label.position.y = n.radius + (n.type === "agent" ? 6 : 8);
+        label = quad(labelTexture(text, n.type === "agent" ? color : "#ede9fe"), 0xffffff, n.type === "agent" ? 5 : n.type === "hub" ? 7.5 : 6.5, false, 0.95);
+        label.position.y = n.radius + (n.type === "agent" ? 6 : n.type === "hub" ? 10 : 8);
         g.add(label);
       }
       n.parts = { core: core, halo: halo, label: label, group: g };
@@ -258,7 +258,7 @@
       if (n.type === "project") return "<b>" + esc(n.name) + "</b><br><small>" + (n.memories || 0) + " memories · " + (n.activity || 0) + " events 7d</small>";
       if (n.type === "agent") return '<b style="color:' + n.color + '">' + esc(n.agent) + "</b> · " + esc(n.name || "") + "<br><small>" +
         (n.active ? "active" : "idle") + (n.connected ? " · mcp connected" : "") + "</small>";
-      return "global memories";
+      return "<b>devmem</b><br><small>memory hub</small>";
     }
 
     // ---------------------------------------------------------------- graph merge (keeps positions and three objects)
@@ -272,7 +272,7 @@
         next.push(n); byId[id] = n;
         return n;
       }
-      keep("__global", { type: "hub", radius: 2.2, color: "#c4b5fd", baseGlow: 0.35, val: 2, fx: 0, fy: 0, fz: 0 });
+      keep("__brain__", { type: "hub", name: "devmem", radius: 12, color: "#e9d5ff", baseGlow: 1, val: 18, fx: 0, fy: 0, fz: 0 });
       var side = 1;
       (g.projects || []).forEach(function (p) {
         var n = keep("p:" + p.id, { type: "project", project: p.id, name: p.name, path: p.path, memories: p.memories, activity: p.activity,
@@ -285,7 +285,7 @@
         var n = keep("m:" + m.id, { type: "memory", mid: m.id, title: m.title, kind: m.kind, cluster: m.cluster, project: m.project,
           radius: 1.5, color: KIND_COLORS[m.kind] || "#94a3b8", baseGlow: 0.42, val: 1 });
         if (fresh) {
-          var parent = byId[m.cluster === "global" ? "__global" : "p:" + m.cluster];
+          var parent = byId[m.cluster === "global" ? "__brain__" : "p:" + m.cluster];
           if (parent && parent.x !== undefined) {
             n.x = parent.x + (Math.random() - 0.5) * 8; n.y = parent.y + (Math.random() - 0.5) * 8; n.z = parent.z + (Math.random() - 0.5) * 8;
           }
@@ -308,14 +308,14 @@
       var perCluster = {};
       next.forEach(function (n) {
         if (n.type === "memory") {
-          var parent = n.cluster === "global" ? "__global" : "p:" + n.cluster;
+          var parent = n.cluster === "global" ? "__brain__" : "p:" + n.cluster;
           if (!byId[parent]) return;
           var k = perCluster[parent] = (perCluster[parent] || 0) + 1;
           link(parent, n.id, n.cluster === "global" ? "hm" : "pm", n.cluster === "global" ? "#6d5fd6" : "#5b5bd6", Math.sqrt(k) * 2.2);
-        } else if (n.type === "agent" && n.project && byId["p:" + n.project]) {
-          link(n.id, "p:" + n.project, "am", n.color);
+        } else if (n.type === "agent") {
+          link(n.id, "__brain__", "ah", n.color);
         } else if (n.type === "project") {
-          link("__global", n.id, "hp", "#3b3f8f");   // faint spine so lobes form one web
+          link("__brain__", n.id, "hp", "#6d5fd6");
         }
       });
       // mark structural changes on reused objects (colour/size of an existing agent etc.)
@@ -354,27 +354,42 @@
 
     function pulse(p) {
       if (!ready) return;
-      var project = p.project ? nodeById["p:" + p.project] : null;
+      var hub = nodeById.__brain__, project = p.project ? nodeById["p:" + p.project] : null;
+      var agent = findAgent(p), now = performance.now();
       if (p.type === "memory") {
-        pendingBloom[p.id] = 1;
-        flash(project, 1600);
+        if (agent) flash(agent, 900);
+        var memoryLink = agent && hub && linkByKey[agent.id + ">" + hub.id];
+        emit(memoryLink, agent ? agent.color : agentColor(p.agent), 2.6);
+        setTimeout(function () {
+          flash(hub, 1300);
+          pendingBloom[p.id] = 1;
+          var existing = nodeById["m:" + p.id];
+          if (existing) {
+            existing.bloomAt = performance.now();
+            anims.push({ node: existing, kind: "bloom", start: existing.bloomAt, dur: 1100 });
+          }
+          flash(project, 1600);
+        }, memoryLink && !REDUCED ? 950 : 0);
         return;
       }
-      var agent = findAgent(p), now = performance.now();
       var key = (agent ? agent.id : "x") + p.type;
       if (lastImpulse[key] && now - lastImpulse[key] < 350) return;
       lastImpulse[key] = now;
       var color = agent ? agent.color : agentColor(p.agent);
       var small = p.type === "usage";
       if (agent) flash(agent, 900);
+      if (agent) emit(linkByKey[agent.id + ">" + hub.id], color, small ? 1.6 : 2.6);
       if (!project) return;
-      var al = agent && linkByKey[agent.id + ">" + project.id];
-      emit(al, color, small ? 1.6 : 2.6);
-      var delay = al && !REDUCED ? 950 : 0;
+      var delay = agent && hub && !REDUCED ? 950 : 0;
       setTimeout(function () {
+        flash(hub, 1300);
+        emit(hub && linkByKey[hub.id + ">" + project.id], color, small ? 1.6 : 2.6);
+        var projectDelay = hub && !REDUCED ? 950 : 0;
+        setTimeout(function () {
         flash(project, 1300);
         var mem = links.filter(function (l) { return l.kind === "pm" && (l.source === project || l.source === project.id); });
         for (var i = 0; i < Math.min(2, mem.length); i++) emit(mem[Math.floor(Math.random() * mem.length)], color, small ? 1.1 : 1.6);
+        }, projectDelay);
       }, delay);
     }
 
@@ -397,9 +412,9 @@
           parts.halo.scale.setScalar(n.radius * 6 * (1 + (1 - t) * 2.5));
         } else {
           var f = 1 - t;
-          parts.core.material.emissiveIntensity = 0.85 + f * 1.6;
+          parts.core.material.emissiveIntensity = (n.type === "hub" ? 1.5 : 0.85) + f * 1.6;
           parts.halo.material.opacity = n.baseGlow + f * 0.9;
-          var base = n.radius * (n.type === "project" ? 7 : n.type === "agent" ? 9 : 6);
+          var base = n.radius * (n.type === "hub" ? 10 : n.type === "project" ? 7 : n.type === "agent" ? 9 : 6);
           parts.halo.scale.setScalar(base * (1 + f * 1.4));
         }
         if (t >= 1) {

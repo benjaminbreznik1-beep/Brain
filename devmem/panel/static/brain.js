@@ -274,7 +274,7 @@
     var ctx = canvas.getContext("2d");
     var W = 0, H = 0, DPR = 1, G = null;        // size and geometry
     var outline = null;                        // pre-rendered silhouette
-    var nodes = [], nodeById = {}, memLinks = [], agentLinks = [];
+    var nodes = [], nodeById = {}, memLinks = [], agentLinks = [], projectLinks = [];
     var sim = null, hasD3 = !!(window.d3 && window.d3.forceSimulation);
     var impulses = [], flashes = {}, pendingBloom = {};
     var sprites = {};
@@ -402,11 +402,11 @@
       projects.forEach(function (p) {
         if (p.id === "other") { p.ax = G.cx; p.ay = G.cy + G.ry * 0.62; }
       });
-      var hub = nodeById.__global;
+      var hub = nodeById.__brain__;
       if (hub) { hub.ax = G.cx; hub.ay = G.cy; hub.fx = G.cx; hub.fy = G.cy; }
       nodes.forEach(function (n) {
         if (n.type === "memory") {
-          var parent = nodeById[n.cluster === "global" ? "__global" : "p:" + n.cluster];
+          var parent = nodeById[n.cluster === "global" ? "__brain__" : "p:" + n.cluster];
           n.ax = parent ? parent.ax : G.cx;
           n.ay = parent ? parent.ay : G.cy;
         }
@@ -499,7 +499,7 @@
         next.push(n); byId[id] = n;
         return n;
       }
-      keep("__global", { type: "hub", r: 3 * G.s + 1.5, name: "global" });
+      keep("__brain__", { type: "hub", r: 16 * G.s + 5, name: "devmem", color: "#e9d5ff" });
       (g.projects || []).forEach(function (p) {
         keep("p:" + p.id, { type: "project", project: p.id, name: p.name, path: p.path, memories: p.memories, activity: p.activity,
           r: Math.min(16, 6 + Math.sqrt(p.memories || 0) * 1.3) * G.s + 3 });
@@ -515,13 +515,15 @@
           active: a.active, connected: a.connected, r: 6 * G.s + 2.5, color: agentColor(a.agent) });
       });
       nodes = next; nodeById = byId;
-      memLinks = []; agentLinks = [];
+      memLinks = []; agentLinks = []; projectLinks = [];
       nodes.forEach(function (n) {
         if (n.type === "memory") {
-          var parent = n.cluster === "global" ? "__global" : "p:" + n.cluster;
+          var parent = n.cluster === "global" ? "__brain__" : "p:" + n.cluster;
           if (byId[parent]) memLinks.push({ source: parent, target: n.id });
-        } else if (n.type === "agent" && n.project && byId["p:" + n.project]) {
-          agentLinks.push({ source: n, target: byId["p:" + n.project] });
+        } else if (n.type === "agent") {
+          agentLinks.push({ source: n, target: byId.__brain__ });
+        } else if (n.type === "project") {
+          projectLinks.push({ source: byId.__brain__, target: n });
         }
       });
       assignAnchors();
@@ -559,32 +561,46 @@
 
     function pulse(p) {
       if (!G) return;
-      var project = p.project ? nodeById["p:" + p.project] : null;
+      var hub = nodeById.__brain__, project = p.project ? nodeById["p:" + p.project] : null;
+      var agent = findAgent(p), now = performance.now();
       if (p.type === "memory") {
-        pendingBloom[p.id] = 1;
-        var existing = nodeById["m:" + p.id];
-        if (existing) existing.bloom = performance.now();
-        if (project) flashes[project.id] = performance.now();
+        if (agent) agent.lit = now;
+        if (!REDUCED && agent && hub) impulses.push({ path: curvePoints(agent, hub), start: now, dur: 900, color: agent.color, small: false, project: null, targets: [] });
+        setTimeout(function () {
+          if (hub) flashes[hub.id] = performance.now();
+          pendingBloom[p.id] = 1;
+          var existing = nodeById["m:" + p.id];
+          if (existing) existing.bloom = performance.now();
+          if (project) flashes[project.id] = performance.now();
+          kick();
+        }, agent && hub && !REDUCED ? 900 : 0);
         kick();
         return;
       }
-      var agent = findAgent(p);
       var key = (agent ? agent.id : "x") + p.type;
-      var now = performance.now();
       if (lastImpulse[key] && now - lastImpulse[key] < 350) return;
       lastImpulse[key] = now;
       if (agent) agent.lit = now;
       if (!project) { kick(); return; }
-      if (REDUCED) { flashes[project.id] = now; dirty = true; return; }
+      if (REDUCED) { if (hub) flashes[hub.id] = now; flashes[project.id] = now; dirty = true; return; }
       var color = agent ? agent.color : agentColor(p.agent);
-      var path = agent ? curvePoints(agent, project) : [[project.x, G.cy - G.ry * 1.05], [project.x, project.y]];
       // continue into one or two neurons of the lobe
       var mems = nodes.filter(function (n) { return n.type === "memory" && n.cluster === p.project; });
       var targets = [];
       for (var i = 0; i < Math.min(2, mems.length); i++) targets.push(mems[Math.floor(Math.random() * mems.length)]);
-      if (impulses.length > 60) impulses.shift();
-      impulses.push({ path: path, start: now, dur: p.type === "usage" ? 900 : 1100, color: color, small: p.type === "usage",
-        project: project, targets: targets });
+      var dur = p.type === "usage" ? 900 : 1100, firstEnd = now;
+      if (agent && hub) {
+        impulses.push({ path: curvePoints(agent, hub), start: now, dur: dur, color: color, small: p.type === "usage", project: hub, targets: [] });
+        firstEnd += dur;
+      }
+      if (hub) {
+        impulses.push({ path: curvePoints(hub, project), start: firstEnd, dur: dur, color: color, small: p.type === "usage", project: project, targets: [] });
+        firstEnd += dur;
+      }
+      targets.forEach(function (target) {
+        impulses.push({ path: curvePoints(project, target), start: firstEnd, dur: dur, color: color, small: p.type === "usage", project: project, targets: [target] });
+      });
+      if (impulses.length > 60) impulses.splice(0, impulses.length - 60);
       kick();
     }
 
@@ -611,11 +627,20 @@
       }
       ctx.stroke();
 
-      // synapses: agent -> project
+      // synapses: agent -> brain, then brain -> project
       agentLinks.forEach(function (l) {
         var pts = curvePoints(l.source, l.target);
         ctx.strokeStyle = l.source.color + (l.source.active ? "55" : "26");
         ctx.lineWidth = l.source.active ? 1.3 : 0.9;
+        ctx.beginPath();
+        ctx.moveTo(pts[0][0], pts[0][1]);
+        for (var k = 1; k < pts.length; k++) ctx.lineTo(pts[k][0], pts[k][1]);
+        ctx.stroke();
+      });
+      projectLinks.forEach(function (l) {
+        var pts = curvePoints(l.source, l.target);
+        ctx.strokeStyle = "rgba(190,170,255,0.28)";
+        ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(pts[0][0], pts[0][1]);
         for (var k = 1; k < pts.length; k++) ctx.lineTo(pts[k][0], pts[k][1]);
@@ -655,20 +680,33 @@
       }
       ctx.globalAlpha = 1;
 
-      // global hub
-      var hub = nodeById.__global;
+      // devmem hub
+      var hub = nodeById.__brain__;
       if (hub && hub.x !== undefined) {
-        ctx.globalAlpha = 0.5;
-        var hs = 26 * G.s + 8;
+        var hf = flashes[hub.id] ? (now - flashes[hub.id]) / 1400 : 1;
+        if (hf < 1) anyAnim = true; else delete flashes[hub.id];
+        var hl = hf < 1 ? 1 - hf : 0;
+        ctx.globalAlpha = 0.9 + hl * 0.1;
+        var hs = hub.r * (6.8 + hl * 4);
         ctx.drawImage(sprite("#c4b5fd"), hub.x - hs / 2, hub.y - hs / 2, hs, hs);
         ctx.globalAlpha = 1;
+        ctx.fillStyle = "#fff";
+        ctx.beginPath(); ctx.arc(hub.x, hub.y, hub.r * 0.48, 0, Math.PI * 2); ctx.fill();
+        ctx.font = "700 " + Math.max(11, fs - 1) + "px " + FONT;
+        ctx.textAlign = "center";
+        var hubLabel = "devmem", hubW = ctx.measureText(hubLabel).width;
+        ctx.fillStyle = "rgba(5,8,20,0.62)";
+        ctx.fillRect(hub.x - hubW / 2 - 5, hub.y + hub.r + 5, hubW + 10, fs + 4);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(hubLabel, hub.x, hub.y + hub.r + 7);
       }
 
       // impulses
       for (var q = impulses.length - 1; q >= 0; q--) {
         var im = impulses[q], p = (now - im.start) / im.dur;
+        if (p < 0) { anyAnim = true; continue; }
         if (p >= 1) {
-          flashes[im.project.id] = now;
+          if (im.project) flashes[im.project.id] = now;
           im.targets.forEach(function (tn) { tn.lit = now; });
           impulses.splice(q, 1);
           continue;
