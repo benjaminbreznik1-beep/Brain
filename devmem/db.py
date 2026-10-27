@@ -16,9 +16,11 @@ import numpy as np
 
 from .embed import EMBEDDING_DIM, EMBEDDING_MODEL, get_embedder
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # bge-small-en-v1.5 scores unrelated text ~0.45-0.59 and real matches ~0.65+ (measured on ~40 memories, 2026-10).
 MIN_COSINE = 0.6
+# measured 2026-10-27 on 56 memories: real duplicates scored 0.86-0.92, related-but-distinct memories up to 0.89, so this is a hint, not a block.
+SIMILAR_COSINE = 0.80
 
 
 # Version 1 schema, kept verbatim: later versions migrate from it additively.
@@ -127,6 +129,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         _migrate_v2(conn)
     if version < 3:
         _migrate_v3(conn)
+    if version < 4:
+        _migrate_v4(conn)
 
 
 _V2_STATEMENTS = (
@@ -187,6 +191,43 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
             for statement in _V3_STATEMENTS:
                 conn.execute(statement)
             conn.execute("UPDATE schema_version SET version=3")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+_V4_STATEMENTS = (
+    "ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    """CREATE TABLE memory_revisions (
+      id INTEGER PRIMARY KEY, memory_id INTEGER NOT NULL, project TEXT, kind TEXT NOT NULL,
+      title TEXT NOT NULL, content TEXT NOT NULL, tags TEXT NOT NULL, pinned INTEGER NOT NULL DEFAULT 0, created_at TEXT,
+      op TEXT NOT NULL CHECK(op IN ('update','delete')), revised_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX memory_revisions_memory_id ON memory_revisions(memory_id, id DESC)",
+    """CREATE TRIGGER memories_revisions_bu BEFORE UPDATE ON memories
+      WHEN old.title IS NOT new.title OR old.content IS NOT new.content OR old.tags IS NOT new.tags
+        OR old.kind IS NOT new.kind OR old.project IS NOT new.project OR old.pinned IS NOT new.pinned
+      BEGIN
+        INSERT INTO memory_revisions(memory_id,project,kind,title,content,tags,pinned,created_at,op,revised_at)
+        VALUES(old.id,old.project,old.kind,old.title,old.content,old.tags,old.pinned,old.created_at,'update',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+      END""",
+    """CREATE TRIGGER memories_revisions_bd BEFORE DELETE ON memories BEGIN
+      INSERT INTO memory_revisions(memory_id,project,kind,title,content,tags,pinned,created_at,op,revised_at)
+      VALUES(old.id,old.project,old.kind,old.title,old.content,old.tags,old.pinned,old.created_at,'delete',strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+    END""",
+)
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    """v3 -> v4.  History is additive and survives deleted memories."""
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 4:
+            for statement in _V4_STATEMENTS:
+                conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=4")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -267,6 +308,45 @@ def ensure_embeddings(conn: sqlite3.Connection, limit: int = 200) -> dict[str, i
         embedded += cur.rowcount
     # A skipped row disappeared between the read and conditional upsert, so it is not pending.
     return {"embedded": embedded, "pending": len(all_stale) - len(stale)}
+
+
+def embed_memory(conn: sqlite3.Connection, memory_id: int) -> bool:
+    """Embed one memory immediately; callers handle unavailable embeddings."""
+    row = conn.execute("SELECT id,title,content,tags FROM memories WHERE id=?", (memory_id,)).fetchone()
+    if not row:
+        return False
+    vectors = get_embedder().embed([embedding_text(row["title"], row["content"], row["tags"])])
+    normalised = _normalise(vectors) if vectors is not None else None
+    if normalised is None:
+        return False
+    conn.execute("""INSERT INTO memory_embeddings(memory_id,model,dim,content_hash,vec) VALUES(?,?,?,?,?)
+        ON CONFLICT(memory_id) DO UPDATE SET model=excluded.model,dim=excluded.dim,
+        content_hash=excluded.content_hash,vec=excluded.vec""",
+        (memory_id, EMBEDDING_MODEL, EMBEDDING_DIM,
+         embedding_hash(row["title"], row["content"], row["tags"]), normalised[0].astype("<f4").tobytes()))
+    return True
+
+
+def similar_memories(conn: sqlite3.Connection, memory_id: int, project: str | None) -> list[dict]:
+    """Return nearby embedded memories in the same scope."""
+    row = conn.execute("SELECT vec FROM memory_embeddings WHERE memory_id=? AND model=? AND dim=?",
+                       (memory_id, EMBEDDING_MODEL, EMBEDDING_DIM)).fetchone()
+    if not row:
+        return []
+    where, params = ("m.project IS NULL", ()) if project is None else ("m.project=?", (project,))
+    rows = conn.execute(f"""SELECT m.id,m.title,e.vec FROM memories m JOIN memory_embeddings e ON e.memory_id=m.id
+        WHERE {where} AND m.id!=? AND e.model=? AND e.dim=?""",
+        (*params, memory_id, EMBEDDING_MODEL, EMBEDDING_DIM)).fetchall()
+    vector = np.frombuffer(row["vec"], dtype="<f4")
+    similar = []
+    for candidate in rows:
+        other = np.frombuffer(candidate["vec"], dtype="<f4")
+        if vector.size != EMBEDDING_DIM or other.size != EMBEDDING_DIM:
+            continue
+        score = float(np.dot(vector, other))
+        if score >= SIMILAR_COSINE:
+            similar.append({"id": candidate["id"], "title": candidate["title"], "score": round(score, 3)})
+    return sorted(similar, key=lambda item: (-item["score"], item["id"]))[:3]
 
 
 def _bm25_candidates(conn: sqlite3.Connection, query: str, where_sql: str, params: tuple, kind: str | None) -> list[dict]:
@@ -367,10 +447,32 @@ def project_for_cwd(cwd: str | None) -> str | None:
 
 def context_text(conn: sqlite3.Connection, project: str | None) -> str:
     """Render the compact project and global-memory briefing."""
-    rows = conn.execute("""SELECT kind,title,content FROM memories WHERE project=? AND kind IN ('decision','preference','todo','note')
+    pinned_rows = conn.execute("SELECT id,kind,title,content,project FROM memories WHERE pinned=1 ORDER BY updated_at DESC").fetchall()
+    pinned_text, cap, last_id = "", 6000 - len("## Pinned\n"), None
+    for row in pinned_rows:
+        name = (Path(row["project"]).name or row["project"]) if row["project"] else "global"
+        item = f"[{row['kind']} #{row['id']} · {name}] {row['title']}\n{row['content']}"
+        note = f"… (truncated; memory_get {row['id']} for the rest)"
+        separator = "\n" if pinned_text else ""
+        if len(pinned_text) + len(separator) + len(item) <= cap:
+            pinned_text += separator + item
+            last_id = row["id"]
+            continue
+        if len(pinned_text) + len(separator) + len(note) > cap:
+            note = f"… (truncated; memory_get {last_id} for the rest)"
+            pinned_text = pinned_text[:cap - len(note) - 1]
+            separator = "\n"
+        available = cap - len(pinned_text) - len(separator) - len(note) - 1
+        if available > 0:
+            pinned_text += separator + item[:available] + "\n"
+        elif pinned_text:
+            pinned_text += "\n"
+        pinned_text += note
+        break
+    rows = conn.execute("""SELECT kind,title,content FROM memories WHERE pinned=0 AND project=? AND kind IN ('decision','preference','todo','note')
         ORDER BY kind='note', updated_at DESC LIMIT 20""", (project,)).fetchall()
-    global_rows = conn.execute("SELECT kind,title,content FROM memories WHERE project IS NULL AND kind IN ('decision','preference') ORDER BY updated_at DESC LIMIT 40").fetchall()
+    global_rows = conn.execute("SELECT kind,title,content FROM memories WHERE pinned=0 AND project IS NULL AND kind IN ('decision','preference') ORDER BY updated_at DESC LIMIT 40").fetchall()
     text = "\n".join(f"[{r['kind']}] {r['title']}: {r['content'][:200]}" for r in rows)[:1500]
     global_text = "\n".join(f"[{r['kind']}] {r['title']}" for r in global_rows)[:3000]  # titles state the rule; memory_get has the detail
-    parts = [f"## Project\n{text}" if text else "", f"## Global preferences\n{global_text}" if global_text else ""]
+    parts = [f"## Pinned\n{pinned_text}" if pinned_text else "", f"## Project\n{text}" if text else "", f"## Global preferences\n{global_text}" if global_text else ""]
     return "\n\n".join(p for p in parts if p) or "No saved project context."

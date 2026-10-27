@@ -37,6 +37,10 @@ Use `devmem context [--cwd DIR]` for a compact project briefing. To give Claude 
 }
 ```
 
+## Memory history and pins
+
+Updates and deletes retain a revision history; use `memory_history` to inspect it and `memory_restore` to undo a change or recover a deleted memory. `memory_save` may return same-scope `similar` hints when embeddings are available: they never block a save, but a duplicate should be merged into the existing memory. Set `pinned=true` only for memories every session needs; pinned memories from every project appear first in the context briefing. With `DEVMEM_EMBED=0`, saves still work normally and omit similar hints.
+
 ## Azure DevOps
 
 ADO is optional and read-only. Create a PAT with **Work Items: Read** and **Code: Read**, store it in `~/.devmem/ado_token`, then run `chmod 600 ~/.devmem/ado_token`. The organization and project are currently hard-coded as `example-org` and `ExampleProject`. When the token exists, the running panel polls ADO every 5 minutes. MCP clients can call `ado_status`; it reads the panel cache, so the panel must be running (set `DEVMEM_PANEL_PORT` if it is not on the default port).

@@ -6,6 +6,7 @@ import errno
 import json
 import os
 import socket
+import sys
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -13,9 +14,9 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .db import connection, context_text, hybrid_search, now, project_for_cwd
+from .db import connection, context_text, embed_memory, hybrid_search, now, project_for_cwd, similar_memories
 
-mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; save durable decisions, preferences, and hard-won gotchas. Never store secrets, credentials, or private keys.")
+mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
 _client_name: str | None = None
 
@@ -178,20 +179,29 @@ def _scope(scope: str, project: str | None) -> tuple[str, tuple]:
     raise ValueError("scope must be project, global, or all")
 
 
-@mcp.tool(description="Save a durable coding memory. Use after discovering a decision, user preference, gotcha, or reusable snippet; never save secrets.")
-def memory_save(content: str, title: str | None = None, kind: str = "note", tags: str | None = None, scope: str = "project", ctx: Context | None = None) -> dict:
+@mcp.tool(description="Save a durable coding memory and return its id plus optional same-scope duplicate hints; merge a same-fact hint into the old memory. Never save secrets.")
+def memory_save(content: str, title: str | None = None, kind: str = "note", tags: str | None = None, scope: str = "project", pinned: bool = False, ctx: Context | None = None) -> dict:
     def work():
         _, project = _client(); selected = None if scope == "global" else project
         if scope not in ("project", "global"): raise ValueError("scope must be project or global")
         if kind not in {"note","decision","preference","snippet","todo"}: raise ValueError("invalid kind")
         with connection() as conn:
-            cur = conn.execute("INSERT INTO memories(project,kind,title,content,tags,created_at,updated_at,source_agent) VALUES (?,?,?,?,?,?,?,?)",
-              (selected, kind, title or content[:80], content, tags or "", now(), now(), _client_name or "mcp-client"))
-            return {"id": cur.lastrowid}
-    return _call("memory_save", {"title": title, "kind": kind, "scope": scope}, work, ctx)
+            cur = conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,created_at,updated_at,source_agent) VALUES (?,?,?,?,?,?,?,?,?)",
+              (selected, kind, title or content[:80], content, tags or "", int(pinned), now(), now(), _client_name or "mcp-client"))
+            result = {"id": cur.lastrowid}
+            conn.commit()  # loading the embedding model can take seconds; do not hold the write lock meanwhile
+            if os.environ.get("DEVMEM_EMBED") != "0":
+                try:
+                    if embed_memory(conn, cur.lastrowid):
+                        similar = similar_memories(conn, cur.lastrowid, selected)
+                        if similar: result["similar"] = similar
+                except Exception as exc:  # hints are optional; the memory is already saved
+                    print(f"devmem: similar check skipped: {type(exc).__name__}: {exc}"[:250], file=sys.stderr)
+            return result
+    return _call("memory_save", {"title": title, "kind": kind, "scope": scope, "pinned": pinned}, work, ctx)
 
 
-@mcp.tool(description="Search memory before starting non-trivial work, especially for prior decisions, conventions, and gotchas. Uses hybrid keyword + semantic ranking; match is keyword, semantic, or both. Semantic-only hits have plain snippets.")
+@mcp.tool(description="Search before non-trivial work. If project scope is empty, retry scope='all' because the server cwd may differ from the repo. Uses hybrid ranking; match is keyword, semantic, or both.")
 def memory_search(query: str, limit: int = 8, kind: str | None = None, scope: str = "project", ctx: Context | None = None) -> list[dict]:
     def work():
         _, project = _client(); where, params = _scope(scope, project)
@@ -208,20 +218,23 @@ def memory_get(id: int, ctx: Context | None = None) -> dict | None:
 def _get(id: int):
     with connection() as conn:
         row = conn.execute("SELECT * FROM memories WHERE id=?", (id,)).fetchone()
-        return dict(row) if row else None
+        if not row: return None
+        result = dict(row)
+        result["revisions"] = conn.execute("SELECT COUNT(*) FROM memory_revisions WHERE memory_id=?", (id,)).fetchone()[0]
+        return result
 
 
-@mcp.tool(description="Correct or refine an existing memory after information changes; do not use for secrets.")
-def memory_update(id: int, content: str | None = None, title: str | None = None, tags: str | None = None, kind: str | None = None, ctx: Context | None = None) -> dict:
+@mcp.tool(description="Correct an existing memory when a fact changes; its prior version is kept in history. Never use for secrets.")
+def memory_update(id: int, content: str | None = None, title: str | None = None, tags: str | None = None, kind: str | None = None, pinned: bool | None = None, ctx: Context | None = None) -> dict:
     def work():
-        fields = {k:v for k,v in {"content":content,"title":title,"tags":tags,"kind":kind}.items() if v is not None}
+        fields = {k:v for k,v in {"content":content,"title":title,"tags":tags,"kind":kind,"pinned":pinned}.items() if v is not None}
         if kind and kind not in {"note","decision","preference","snippet","todo"}: raise ValueError("invalid kind")
         if not fields: return _get(id) or {"id": id, "missing": True}
         fields["updated_at"] = now()
         with connection() as conn:
             conn.execute("UPDATE memories SET " + ", ".join(f"{k}=?" for k in fields) + " WHERE id=?", (*fields.values(), id))
         return _get(id) or {"id": id, "missing": True}
-    return _call("memory_update", {"id":id}, work, ctx)
+    return _call("memory_update", {"id":id, "pinned":pinned}, work, ctx)
 
 
 @mcp.tool(description="Delete a memory only when it is obsolete, duplicate, or incorrect.")
@@ -232,17 +245,46 @@ def memory_delete(id: int, ctx: Context | None = None) -> dict:
     return _call("memory_delete", {"id":id}, work, ctx)
 
 
-@mcp.tool(description="List recent memories for orientation. Search is better when you have a specific question.")
+@mcp.tool(description="Return prior versions of a memory, newest first, including after deletion; use before restoring or auditing a change.")
+def memory_history(id: int, limit: int = 10, ctx: Context | None = None) -> list[dict]:
+    def work():
+        with connection() as conn:
+            return [dict(row) for row in conn.execute("""SELECT id,op,revised_at,title,kind,project,tags,pinned,created_at,content
+                FROM memory_revisions WHERE memory_id=? ORDER BY id DESC LIMIT ?""", (id, max(1, min(limit, 50)))).fetchall()]
+    return _call("memory_history", {"id": id, "limit": limit}, work, ctx)
+
+
+@mcp.tool(description="Restore one history revision and return the restored memory; use to undo an update or recover a deleted memory.")
+def memory_restore(id: int, revision_id: int, ctx: Context | None = None) -> dict:
+    def work():
+        with connection() as conn:
+            row = conn.execute("SELECT * FROM memory_revisions WHERE id=? AND memory_id=?", (revision_id, id)).fetchone()
+            if not row: raise ValueError("revision does not belong to memory")
+            existing = conn.execute("SELECT created_at FROM memories WHERE id=?", (id,)).fetchone()
+            if existing and row["created_at"] is not None and existing["created_at"] != row["created_at"]:
+                # SQLite reuses the highest id after a delete, so this id now belongs to a different memory.
+                raise ValueError("memory id was reused by a newer memory; save the revision as a new memory instead")
+            if existing:
+                conn.execute("UPDATE memories SET project=?,kind=?,title=?,content=?,tags=?,pinned=?,updated_at=? WHERE id=?",
+                             (row["project"], row["kind"], row["title"], row["content"], row["tags"], row["pinned"], now(), id))
+            else:
+                conn.execute("""INSERT INTO memories(id,project,kind,title,content,tags,pinned,created_at,updated_at,source_agent)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""", (id, row["project"], row["kind"], row["title"], row["content"], row["tags"], row["pinned"], row["created_at"] or now(), now(), _client_name or "mcp-client"))
+        return _get(id)
+    return _call("memory_restore", {"id": id, "revision_id": revision_id}, work, ctx)
+
+
+@mcp.tool(description="List recent memories for orientation; if project scope is empty, retry scope='all'. Search is better for a specific question.")
 def memory_list(limit: int = 20, kind: str | None = None, scope: str = "project", ctx: Context | None = None) -> list[dict]:
     def work():
         _, project = _client(); where, params = _scope(scope, project)
         if kind: where += " AND kind=?"; params += (kind,)
         with connection() as conn:
-            return [dict(r) for r in conn.execute(f"SELECT id,title,kind,project,tags,updated_at FROM memories WHERE {where} ORDER BY updated_at DESC LIMIT ?", (*params, max(1,min(limit,100)))).fetchall()]
+            return [dict(r) for r in conn.execute(f"SELECT id,title,kind,project,tags,pinned,updated_at FROM memories WHERE {where} ORDER BY updated_at DESC LIMIT ?", (*params, max(1,min(limit,100)))).fetchall()]
     return _call("memory_list", {"limit":limit,"kind":kind,"scope":scope}, work, ctx)
 
 
-@mcp.tool(description="Get a compact current-project briefing before non-trivial work: recent project decisions, preferences, todos, and notes, plus titles of global decisions and preferences (use memory_get for detail).")
+@mcp.tool(description="Get a compact briefing before non-trivial work: all pinned memories, recent project context, and global preferences.")
 def project_context(ctx: Context | None = None) -> str:
     def work():
         _, project = _client()
