@@ -3,13 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}devmem{% endblock %}</title>
+  <title>{% block title %}Brain{% endblock %}</title>
   <link rel="stylesheet" href="/static/site.css">
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <header class="topbar">
-    <a class="brand" href="/"><span class="brand-dot"></span>devmem</a>
+    <a class="brand" href="/"><span class="brand-dot"></span>Brain</a>
     <nav>
       <a href="/" class="{{ 'on' if active == 'brain' }}">Brain</a>
       <a href="/overview" class="{{ 'on' if active == 'overview' }}">Overview</a>

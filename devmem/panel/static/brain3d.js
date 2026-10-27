@@ -26,7 +26,7 @@
     var pendingGraph = null, pendingBloom = {}, anims = [], lastImpulse = {};
     var active = true, ready = false, fitted = false, resumeTimer = null, loopOn = false, lastTwinkle = 0;
     var texCache = {}, geomCache = {};
-    var bloomPass = null, bloomAdded = false, bloomEnabled = true;
+    var bloomPass = null, bloomAdded = false, bloomEnabled = true, bloomError = "";
 
     try { bloomEnabled = localStorage.getItem("devmem.glow") !== "0"; } catch (e) { /* default on */ }
 
@@ -58,9 +58,9 @@
       if (bloomAdded || !window.__devmemBloom) return;
       try {
         var composer = Graph.postProcessingComposer && Graph.postProcessingComposer();
-        if (!composer || !composer.addPass) return;
+        if (!composer || !composer.addPass) { bloomError = "3D graph has no post-processing composer"; setGlow(bloomEnabled); return; }
         // A plain x/y object is sufficient; UnrealBloomPass copies it into its own Vector2.
-        bloomPass = new window.__devmemBloom({ x: 1, y: 1 }, 1.4, 0.6, 0.15);
+        bloomPass = new window.__devmemBloom({ x: 1, y: 1 }, 0.75, 0.45, 0.25);
         bloomPass.enabled = bloomEnabled;
         composer.addPass(bloomPass);
         bloomAdded = true;
@@ -70,7 +70,16 @@
       } catch (e) {
         // The graph and its halo fallback remain usable if the module/composer is incompatible.
         bloomPass = null;
+        bloomError = String((e && e.message) || e);
+        console.warn("devmem: bloom unavailable", e);
       }
+      setGlow(bloomEnabled);
+    }
+
+    function bloomFailed() {
+      bloomError = window.__devmemBloomError || "bloom module failed to load";
+      console.warn("devmem: bloom unavailable:", bloomError);
+      setGlow(bloomEnabled);
     }
 
     function setGlow(on) {
@@ -81,8 +90,12 @@
       var button = document.getElementById("glow-toggle");
       if (button) {
         button.setAttribute("aria-pressed", on ? "true" : "false");
-        button.textContent = on ? "Glow" : "Glow off";
-        button.title = on ? "Turn off 3D bloom glow" : "Turn on 3D bloom glow";
+        button.classList.toggle("on", on);
+        button.textContent = on ? "● Glow on" : "○ Glow off";
+        button.title = on ? "Turn off 3D bloom glow (3D view only)" : "Turn on 3D bloom glow (3D view only)";
+        // Make a missing bloom effect visible instead of a toggle that silently does nothing.
+        button.classList.toggle("unavailable", !bloomPass);
+        if (!bloomPass) button.title = "Glow effect not active: " + (bloomError || "bloom module still loading");
       }
     }
 
@@ -115,6 +128,8 @@
     if (glowButton) glowButton.addEventListener("click", function () { setGlow(!bloomEnabled); });
     setGlow(bloomEnabled);
     window.addEventListener("devmem-bloom", ensureBloom);
+    window.addEventListener("devmem-bloom-failed", bloomFailed);
+    if (window.__devmemBloomError) bloomFailed();
     ensureBloom();
 
     // ---------------------------------------------------------------- forces: web, clusters, loose brain shape
@@ -323,7 +338,7 @@
       if (n.type === "project") return "<b>" + esc(n.name) + "</b><br><small>" + (n.memories || 0) + " memories · " + (n.activity || 0) + " events 7d</small>";
       if (n.type === "agent") return '<b style="color:' + n.color + '">' + esc(n.agent) + "</b> · " + esc(n.name || "") + "<br><small>" +
         (n.active ? "active" : "idle") + (n.connected ? " · mcp connected" : "") + "</small>";
-      return "<b>devmem</b><br><small>memory hub</small>";
+      return "<b>Brain</b><br><small>where your knowledge meets the models</small>";
     }
 
     // ---------------------------------------------------------------- graph merge (keeps positions and three objects)
@@ -337,7 +352,7 @@
         next.push(n); byId[id] = n;
         return n;
       }
-      keep("__brain__", { type: "hub", name: "devmem", radius: 12, color: "#e9d5ff", baseGlow: 1, val: 18, fx: 0, fy: 0, fz: 0 });
+      keep("__brain__", { type: "hub", name: "Brain", radius: 12, color: "#e9d5ff", baseGlow: 1, val: 18, fx: 0, fy: 0, fz: 0 });
       var side = 1;
       (g.projects || []).forEach(function (p) {
         var n = keep("p:" + p.id, { type: "project", project: p.id, name: p.name, path: p.path, memories: p.memories, activity: p.activity,

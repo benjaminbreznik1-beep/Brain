@@ -520,7 +520,7 @@
         next.push(n); byId[id] = n;
         return n;
       }
-      keep("__brain__", { type: "hub", r: 16 * G.s + 5, name: "devmem", color: "#e9d5ff" });
+      keep("__brain__", { type: "hub", r: 16 * G.s + 5, name: "Brain", color: "#e9d5ff" });
       (g.projects || []).forEach(function (p) {
         keep("p:" + p.id, { type: "project", project: p.id, name: p.name, path: p.path, memories: p.memories, activity: p.activity,
           r: Math.min(16, 6 + Math.sqrt(p.memories || 0) * 1.3) * G.s + 3 });
@@ -721,7 +721,7 @@
         ctx.beginPath(); ctx.arc(hub.x, hub.y, hub.r * 0.48, 0, Math.PI * 2); ctx.fill();
         ctx.font = "700 " + Math.max(11, fs - 1) + "px " + FONT;
         ctx.textAlign = "center";
-        var hubLabel = "devmem", hubW = ctx.measureText(hubLabel).width;
+        var hubLabel = "Brain", hubW = ctx.measureText(hubLabel).width;
         ctx.fillStyle = "rgba(5,8,20,0.62)";
         ctx.fillRect(hub.x - hubW / 2 - 5, hub.y + hub.r + 5, hubW + 10, fs + 4);
         ctx.fillStyle = "#fff";
@@ -906,6 +906,16 @@
 
   // ------------------------------------------------------------------ 2D / 3D switch
 
+  // Glow is owned by brain3d.js; show the saved state even before (or without) the 3D view starting.
+  (function () {
+    var glow = $("glow-toggle"), on = true;
+    if (!glow) return;
+    try { on = localStorage.getItem("devmem.glow") !== "0"; } catch (e) { /* default on */ }
+    glow.classList.toggle("on", on);
+    glow.setAttribute("aria-pressed", on ? "true" : "false");
+    glow.textContent = on ? "● Glow on" : "○ Glow off";
+  })();
+
   var Brain = (function () {
     var mode = "3d", impl3d = null, lastGraph = null, reason = "";
     var btn = $("dim-toggle"), box3d = $("brain3d");
@@ -938,7 +948,8 @@
       if (use3d && lastGraph) impl3d.setGraph(lastGraph); // merge by id: positions are kept
       Brain2D.setActive(!use3d);
       if (!use3d && lastGraph) Brain2D.setGraph(lastGraph);
-      btn.textContent = use3d ? "3D" : "2D";
+      btn.innerHTML = '<span class="seg' + (use3d ? "" : " active") + '">2D</span><span class="seg' + (use3d ? " active" : "") + '">3D</span>';
+      document.body.classList.toggle("view-2d", !use3d);
       btn.title = use3d ? "Showing the 3D web; click for the flat 2D brain" :
         (wanted === "3d" && reason ? "3D unavailable (" + reason + "); showing 2D" : "Showing the 2D brain; click for the 3D web");
       btn.classList.toggle("unavailable", wanted === "3d" && !use3d);

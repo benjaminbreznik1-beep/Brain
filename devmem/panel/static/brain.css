@@ -71,6 +71,18 @@ body:not(.wall-mode) .wall-hint { display: none; }
 
 button.ghost.unavailable { color: var(--dim); border-style: dashed; }
 
+/* toggle states: lit when on, so the current mode is obvious at a glance */
+button.ghost.on {
+  color: var(--text);
+  background: rgba(167, 139, 250, 0.22);
+  border-color: rgba(167, 139, 250, 0.75);
+  box-shadow: 0 0 10px rgba(167, 139, 250, 0.35);
+}
+#dim-toggle { padding: 0.15rem; display: inline-flex; gap: 0.1rem; }
+#dim-toggle .seg { padding: 0.1rem 0.6rem; border-radius: 999px; }
+#dim-toggle .seg.active { color: var(--text); background: rgba(167, 139, 250, 0.32); box-shadow: 0 0 8px rgba(167, 139, 250, 0.35); }
+body.view-2d #glow-toggle { opacity: 0.45; border-style: dashed; box-shadow: none; }
+
 /* connection badge */
 .status {
   position: fixed;
