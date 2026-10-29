@@ -16,6 +16,29 @@
   {% endfor %}
 </div>
 
+<div class="card panel-tokens" id="tokens">
+  <div class="tok-block">
+    <h3>Today</h3>
+    <div class="tok-big" id="tok-today">0</div>
+    <div class="tok-split" id="tok-today-split"></div>
+  </div>
+  <div class="tok-block">
+    <h3>7 days</h3>
+    <div class="tok-big" id="tok-week">0</div>
+    <div class="tok-split" id="tok-week-split"></div>
+  </div>
+  <div class="tok-block tok-spark">
+    <h3>Last 24 h <span class="hint">tokens / hour</span></h3>
+    <svg id="spark" preserveAspectRatio="none"></svg>
+  </div>
+  <div class="tok-block tok-models">
+    <h3>Models today
+      <span class="hint seg-legend"><i class="s-in"></i>in <i class="s-out"></i>out <i class="s-cr"></i>cache r <i class="s-cw"></i>cache w</span>
+    </h3>
+    <ul id="models"></ul>
+  </div>
+</div>
+
 <h2>Daily tokens, last 30 days</h2>
 <div class="card"><svg id="chart" class="chart"></svg></div>
 
@@ -61,6 +84,9 @@
       return { x: day, series };
     });
     devmem.barChart(document.querySelector('#chart'), rows, devmem.agentColors);
+    const tokens = {{ tokens | tojson }};
+    devmem.renderTokens(tokens);
+    window.addEventListener('resize', () => devmem.renderSpark(tokens.hourly || {}));
   })();
 </script>
 {% endblock %}

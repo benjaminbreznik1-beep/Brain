@@ -193,68 +193,30 @@
     }).then(renderAdoCard).catch(function (e) { console.warn("devmem: /api/ado failed", e); });
   }
 
-  // ------------------------------------------------------------------ tokens
-
-  function splitHtml(map) {
-    var agents = Object.keys(map || {}).sort();
-    if (!agents.length) return '<div class="empty">no usage</div>';
-    return agents.map(function (a) {
-      return '<div style="--c:' + agentColor(a) + '"><span>' + esc(agentShort(a)) + "</span><b>" + U.fmtTokens(map[a].total) + "</b></div>";
-    }).join("");
-  }
-
-  function renderSpark(hourly) {
-    var svg = $("spark");
-    var w = svg.clientWidth || 300, h = svg.clientHeight || 80;
-    svg.setAttribute("viewBox", "0 0 " + w + " " + h);
-    var series = hourly.series || {};
-    var agents = Object.keys(series).sort();
-    var max = 1;
-    agents.forEach(function (a) { series[a].forEach(function (v) { max = Math.max(max, v); }); });
-    var step = w / 23, out = [];
-    out.push('<line x1="0" y1="' + (h - 1) + '" x2="' + w + '" y2="' + (h - 1) + '" stroke="rgba(120,150,255,.18)"/>');
-    agents.forEach(function (a, idx) {
-      var c = agentColor(a);
-      var pts = series[a].map(function (v, i) { return [i * step, h - 3 - (v / max) * (h - 10)]; });
-      var line = pts.map(function (p) { return p[0].toFixed(1) + "," + p[1].toFixed(1); }).join(" ");
-      out.push('<defs><linearGradient id="sg' + idx + '" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="' + c + '" stop-opacity=".35"/>' +
-        '<stop offset="1" stop-color="' + c + '" stop-opacity="0"/></linearGradient></defs>');
-      out.push('<polygon points="0,' + h + " " + line + " " + w + "," + h + '" fill="url(#sg' + idx + ')"/>');
-      out.push('<polyline points="' + line + '" fill="none" stroke="' + c + '" stroke-width="1.8" stroke-linejoin="round"/>');
-    });
-    out.push('<text x="2" y="11" fill="#56618a" font-size="10">' + U.fmtTokens(max) + "/h</text>");
-    if (!agents.length) out.push('<text x="' + w / 2 + '" y="' + h / 2 + '" fill="#56618a" font-size="12" text-anchor="middle">no usage in 24 h</text>');
-    svg.innerHTML = out.join("");
-  }
-
-  function renderTokens(t) {
-    $("tok-today").textContent = U.fmtTokens(t.today_total);
-    $("tok-week").textContent = U.fmtTokens(t.week_total);
-    $("tok-today-split").innerHTML = splitHtml(t.today);
-    $("tok-week-split").innerHTML = splitHtml(t.week);
-    renderSpark(t.hourly || {});
-    var models = (t.models_today || []).slice(0, 5);
-    $("models").innerHTML = models.length ? models.map(function (m) {
-      var tot = Math.max(1, m.total);
-      var seg = function (cls, v) { return '<i class="' + cls + '" style="width:' + (v / tot * 100).toFixed(2) + '%"></i>'; };
-      return '<li style="--c:' + agentColor(m.agent) + '" title="in ' + m.input + " · out " + m.output + " · cache read " + m.cache_read + " · cache write " + m.cache_write + '">' +
-        '<span class="m-name">' + esc(m.model) + '</span><span class="m-total">' + U.fmtTokens(m.total) + "</span>" +
-        '<span class="seg">' + seg("s-in", m.input) + seg("s-out", m.output) + seg("s-cr", m.cache_read) + seg("s-cw", m.cache_write) + "</span></li>";
-    }).join("") : '<li class="empty">no usage today</li>';
-  }
-
   // ------------------------------------------------------------------ agents
 
+  function subagentRows(list) {
+    return '<ul class="subagents">' + list.map(function (x) {
+      var last = x.last_tool ? '<span class="tool">' + esc(x.last_tool) + "</span> " + esc(x.last_arg || "") : esc(x.description || "");
+      return '<li class="sub ' + esc(x.status) + '" title="' + esc(x.status) + '"><span class="dot"></span>' +
+        '<a class="s-type" href="/messages/agent/' + encodeURIComponent(x.agent_id) + '">' + esc(x.agent_type || "subagent") + "</a>" +
+        '<span class="s-last">' + last + "</span></li>";
+    }).join("") + "</ul>";
+  }
+
   function renderAgents(a) {
-    var sessions = a.sessions || [], clients = a.connected || [];
+    var sessions = a.sessions || [], clients = a.connected || [], subs = a.subagents || {}, shownSubs = {};
     var rows = sessions.slice(0, 8).map(function (s) {
+      // claude and claude-subagent rows share a session id: its subagents are listed once, under the first row.
+      var children = s.agent.indexOf("claude") === 0 && subs[s.session_id] && !shownSubs[s.session_id] ? subs[s.session_id] : null;
+      if (children) shownSubs[s.session_id] = 1;
       var connected = clients.some(function (c) { return c.family === (s.agent.indexOf("codex") >= 0 ? "codex" : "claude") && c.project === s.project; });
       var last = s.last_tool ? '<span class="tool">' + esc(s.last_tool) + "</span> " + esc(s.last_summary || "") :
         (s.tokens_10m ? U.fmtTokens(s.tokens_10m) + " tokens in 10 min" : "");
       return '<li class="agent' + (s.age_s !== null && s.age_s < 120 ? " active" : "") + '" style="--c:' + agentColor(s.agent) + '">' +
         '<span class="pip"></span><span class="a-main"><b>' + esc(agentShort(s.agent)) + "</b> · " + esc(s.project_name) +
         (connected ? ' <span class="hint">· mcp</span>' : "") + '</span><span class="a-age" data-ts="' + esc(s.last_ts) + '">' + U.relTime(s.last_ts) + "</span>" +
-        '<span class="a-last">' + last + "</span></li>";
+        '<span class="a-last">' + last + "</span>" + (children ? subagentRows(children) : "") + "</li>";
     });
     clients.forEach(function (c) {
       var shown = sessions.some(function (s) { return (s.agent.indexOf("codex") >= 0 ? "codex" : "claude") === c.family && s.project === c.project; });
@@ -291,6 +253,28 @@
         (e.summary ? '<span class="f-sum">' + esc(e.summary) + "</span>" : "") + "</li>";
     }).join("") || '<li class="empty">No tool activity yet. It appears here as agents work.</li>';
     feedSeen = next;
+  }
+
+  // ------------------------------------------------------------------ messages
+
+  var msgSeen = null;
+
+  function renderMessages(m) {
+    var items = m.items || [], first = msgSeen === null, seen = msgSeen || {}, next = {};
+    // Compact chat bubbles, newest first; each opens its chat on /messages.
+    $("msgs").innerHTML = items.map(function (x) {
+      next[x.id] = 1;
+      var fresh = !first && !seen[x.id] && !REDUCED;
+      var color = x.mine ? "var(--violet)" : x.who === "Claude" ? "var(--claude)" : "hsl(" + (x.hue || 0) + " 70% 72%)";
+      var href = x.chat ? "/messages?chat=" + encodeURIComponent(x.chat) : "/messages/thread/" + x.thread_id;
+      return '<li class="mb' + (x.mine ? " mine" : "") + (x.unread ? " unread" : "") + (fresh ? " enter" : "") + '" style="--c:' + color + '">' +
+        '<a href="' + href + '"><span class="m-line">' + esc((x.icon || "✉") + " " + (x.headline || x.text || x.line)) + "</span>" +
+        '<span class="m-time" data-ts="' + esc(x.created_at) + '">' + U.relTime(x.created_at) + "</span></a></li>";
+    }).join("") || '<li class="empty">No messages yet. Agents post with message_post; subagent tasks and reports show up here.</li>';
+    msgSeen = next;
+    $("msg-unread").textContent = m.unread ? m.unread + " unread" : "";
+    var badge = $("nav-msg-badge");
+    if (badge) { badge.textContent = m.badge || 0; badge.hidden = !m.badge; }
   }
 
   function tickRelTimes() {
@@ -1005,7 +989,6 @@
     lastState = Object.assign({}, lastState || {}, s);
     if (s.graph) Brain.setGraph(s.graph);
     renderLimits(s.limits || []);
-    renderTokens(s.tokens || {});
     renderAgents(s.agents || {});
     renderFeed(s.activity || []);
     renderCounts(s.counts || {});
@@ -1019,14 +1002,20 @@
     el.querySelector(".txt").textContent = text;
   }
 
+  function disconnect() { if (es) { es.onerror = null; es.close(); es = null; } }
   function connect() {
-    if (es) es.close();
+    disconnect();
+    if (document.hidden) return;
     setStatus("connecting", "connecting");
     es = new EventSource("/api/stream");
     es.addEventListener("state", function (e) {
       lastMessage = Date.now(); backoff = 1000;
       setStatus("live", "live");
       try { applyState(JSON.parse(e.data)); } catch (err) { console.error(err); }
+    });
+    es.addEventListener("messages", function (e) {
+      lastMessage = Date.now();
+      try { renderMessages(JSON.parse(e.data)); } catch (err) { console.error(err); }
     });
     es.addEventListener("pulse", function (e) {
       lastMessage = Date.now();
@@ -1050,12 +1039,19 @@
 
   // Watchdog: a half-open connection (laptop sleep, server restart) sends nothing; reconnect it.
   setInterval(function () {
+    if (!es) return;  // hidden: no stream on purpose
     if (lastMessage && Date.now() - lastMessage > 12000) {
       setStatus("offline", "offline · reconnecting");
       lastMessage = Date.now();
       connect();
     }
   }, 3000);
+
+  // fix(2026-10-28): browsers allow 6 connections per site. A stream left open by a background tab or by a page kept for Back used
+  // one up each, until new pages hung loading forever. Only the visible page keeps its stream.
+  window.addEventListener("pagehide", disconnect);
+  window.addEventListener("pageshow", function (e) { if (e.persisted) connect(); });
+  document.addEventListener("visibilitychange", function () { if (document.hidden) disconnect(); else if (!es) { lastMessage = Date.now(); connect(); } });
 
   setInterval(function () {
     var d = new Date();
@@ -1064,8 +1060,6 @@
     tickGauges();
     tickRelTimes();
   }, 1000);
-
-  window.addEventListener("resize", function () { if (lastState && lastState.tokens) renderSpark(lastState.tokens.hourly || {}); });
 
   connect();
 })();

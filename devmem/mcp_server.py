@@ -1,9 +1,11 @@
 """stdio MCP server.  Memory is intentionally plain SQLite, never an external service."""
 from __future__ import annotations
 
+import asyncio
 import atexit
 import errno
 import json
+import logging
 import os
 import socket
 import sys
@@ -14,7 +16,10 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .db import connection, context_text, embed_memory, hybrid_search, is_stale, now, project_for_cwd, similar_memories, validate_content, validate_review_after
+from . import messages
+
+log = logging.getLogger("devmem.mcp")
+from .db import connection, context_text, embed_memory, hybrid_search, is_stale, now, project_for_cwd, restore_memory, similar_memories, validate_content, validate_review_after
 
 mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Link related memories instead of repeating their content. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
@@ -170,8 +175,8 @@ def _client(ctx: Context | None = None) -> tuple[int, str | None]:
     return _client_id, project
 
 
-def _call(tool: str, args: dict[str, Any], fn, ctx: Context | None = None):
-    started = time.monotonic()
+def _call(tool: str, args: dict[str, Any], fn, ctx: Context | None = None, started: float | None = None):
+    started = started if started is not None else time.monotonic()
     client_id, _ = _client(ctx)
     try:
         result = fn()
@@ -182,10 +187,14 @@ def _call(tool: str, args: dict[str, Any], fn, ctx: Context | None = None):
         count, ok, error = 0, 0, str(exc)
         raise
     finally:
-        with connection() as conn:
-            conn.execute("UPDATE agent_clients SET last_seen_at=? WHERE id=?", (now(), client_id))
-            conn.execute("INSERT INTO tool_calls(client_id,tool,args_summary,result_count,duration_ms,ok,error,at) VALUES (?,?,?,?,?,?,?,?)",
-                         (client_id, tool, json.dumps(args, ensure_ascii=False)[:1000], count, int((time.monotonic()-started)*1000), ok, error, now()))
+        # fix(2026-10-28): bookkeeping only; a locked DB here must neither turn a committed post into an error (the agent re-posts) nor replace the real error.
+        try:
+            with connection() as conn:
+                conn.execute("UPDATE agent_clients SET last_seen_at=? WHERE id=?", (now(), client_id))
+                conn.execute("INSERT INTO tool_calls(client_id,tool,args_summary,result_count,duration_ms,ok,error,at) VALUES (?,?,?,?,?,?,?,?)",
+                             (client_id, tool, json.dumps(args, ensure_ascii=False)[:1000], count, int((time.monotonic()-started)*1000), ok, error, now()))
+        except Exception:
+            log.warning("could not log the %s tool call", tool, exc_info=True)
 
 
 def _scope(scope: str, project: str | None) -> tuple[str, tuple]:
@@ -238,6 +247,8 @@ def _get(id: int):
         row = conn.execute("SELECT * FROM memories WHERE id=?", (id,)).fetchone()
         if not row: return None
         result = dict(row)
+        superseded = conn.execute("SELECT from_id FROM memory_links WHERE to_id=? AND type='supersedes' ORDER BY id DESC LIMIT 1", (id,)).fetchone()
+        result["superseded_by"] = superseded["from_id"] if superseded else None
         result["revisions"] = conn.execute("SELECT COUNT(*) FROM memory_revisions WHERE memory_id=?", (id,)).fetchone()[0]
         result["links"] = [dict(link) for link in conn.execute("""SELECT l.id,l.type,'out' direction,l.to_id other_id,m.title other_title,l.note
             FROM memory_links l JOIN memories m ON m.id=l.to_id WHERE l.from_id=?
@@ -310,24 +321,7 @@ def memory_history(id: int, limit: int = 10, ctx: Context | None = None) -> list
 def memory_restore(id: int, revision_id: int, ctx: Context | None = None) -> dict:
     def work():
         with connection() as conn:
-            row = conn.execute("SELECT * FROM memory_revisions WHERE id=? AND memory_id=?", (revision_id, id)).fetchone()
-            if not row: raise ValueError("revision does not belong to memory")
-            existing = conn.execute("SELECT created_at FROM memories WHERE id=?", (id,)).fetchone()
-            if existing and row["created_at"] is not None and existing["created_at"] != row["created_at"]:
-                # SQLite reuses the highest id after a delete, so this id now belongs to a different memory.
-                raise ValueError("memory id was reused by a newer memory; save the revision as a new memory instead")
-            if existing:
-                conn.execute("UPDATE memories SET project=?,kind=?,title=?,content=?,tags=?,pinned=?,updated_at=? WHERE id=?",
-                             (row["project"], row["kind"], row["title"], row["content"], row["tags"], row["pinned"], now(), id))
-            else:
-                conn.execute("""INSERT INTO memories(id,project,kind,title,content,tags,pinned,created_at,updated_at,source_agent)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)""", (id, row["project"], row["kind"], row["title"], row["content"], row["tags"], row["pinned"], row["created_at"] or now(), now(), _client_name or "mcp-client"))
-                if row["op"] == "delete":
-                    conn.execute("""INSERT OR IGNORE INTO memory_links(from_id,to_id,type,note,created_at)
-                        SELECT from_id,to_id,type,note,created_at FROM memory_link_revisions
-                        WHERE memory_revision_id=? AND (from_id=? OR to_id=?)
-                          AND EXISTS(SELECT 1 FROM memories WHERE id=CASE WHEN from_id=? THEN to_id ELSE from_id END)""",
-                        (revision_id, id, id, id))
+            restore_memory(conn, id, revision_id, _client_name or "mcp-client")
         return _get(id)
     return _call("memory_restore", {"id": id, "revision_id": revision_id}, work, ctx)
 
@@ -338,7 +332,8 @@ def memory_list(limit: int = 20, kind: str | None = None, scope: str = "project"
         _, project = _client(); where, params = _scope(scope, project)
         if kind: where += " AND kind=?"; params += (kind,)
         with connection() as conn:
-            return [{**dict(r), "stale": is_stale(r["review_after"])} for r in conn.execute(f"SELECT id,title,kind,project,tags,pinned,review_after,updated_at FROM memories WHERE {where} ORDER BY updated_at DESC LIMIT ?", (*params, max(1,min(limit,100)))).fetchall()]
+            return [{**dict(r), "stale": is_stale(r["review_after"])} for r in conn.execute(f"""SELECT id,title,kind,project,tags,pinned,review_after,updated_at FROM memories
+                WHERE {where} AND NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=memories.id AND sl.type='supersedes') ORDER BY updated_at DESC LIMIT ?""", (*params, max(1,min(limit,100)))).fetchall()]
     return _call("memory_list", {"limit":limit,"kind":kind,"scope":scope}, work, ctx)
 
 
@@ -349,6 +344,20 @@ def project_context(ctx: Context | None = None) -> str:
         with connection() as conn:
             return context_text(conn, project)
     return _call("project_context", {}, work, ctx)
+
+
+@mcp.tool(description="Return the latest automatic-maintenance run and unresolved flags for the current project. This tool never starts maintenance.")
+def maintenance_status(ctx: Context | None = None) -> dict:
+    def work():
+        from .maintenance import OPEN_FLAG_SQL, attention
+        _, project = _client()
+        with connection() as conn:
+            last = conn.execute("SELECT * FROM maintenance_runs WHERE status NOT IN ('requested','done','skipped') ORDER BY id DESC LIMIT 1").fetchone()
+            flags = conn.execute(f"""SELECT c.id,c.memory_id,c.target_id,c.summary,c.blocked_by,c.new_title,c.new_content,c.created_at,m.title memory_title
+                FROM maintenance_changes c JOIN memories m ON m.id=c.memory_id
+                WHERE {OPEN_FLAG_SQL} AND (m.project=? OR m.project IS NULL) ORDER BY c.id DESC LIMIT 50""", (project,)).fetchall()
+            return {"last_run": dict(last) if last else None, "pending_flags": [dict(row) for row in flags], "failing": attention(conn)["failing_since"]}
+    return _call("maintenance_status", {}, work, ctx)
 
 
 @mcp.tool(description="Read-only Azure DevOps summary served from the running devmem panel's cache (5-min refresh). section: all | waiting_for_me (PRs to review, own PRs approved-not-completed or with changes requested) | waiting_on_others | tasks (open work items assigned to you in the configured project). refresh=true forces a live fetch (slow). Returns available:false with a reason if the panel is down, ADO is unconfigured, or data is not loaded yet.")
@@ -380,6 +389,90 @@ def ado_status(section: str = "all", refresh: bool = False, ctx: Context | None 
             result["note"] = "refresh timed out; showing cached data"
         return result
     return _call("ado_status", {"section": section, "refresh": refresh}, work, ctx)
+
+
+# ---------------------------------------------------------------- messages between agents
+
+WAIT_POLL_S = 2.0
+WAIT_MAX_S = 60
+
+
+def _me(sender: str | None) -> str:
+    """Subagents share the parent's MCP connection, so only a self-declared name tells them apart."""
+    return (sender or "").strip() or _client_name or "mcp-client"
+
+
+def _sender_kind(declared: bool) -> str:
+    if "codex" in (_client_name or "").lower(): return "codex"
+    return "subagent" if declared else "claude"
+
+
+@mcp.tool(description="Post a message, finding, question or hand-off for other agents and the user (they see it in the devmem panel). subject: one short line saying what happened, for example 'tests pass, 2 fixes left' — this is what the user reads; it is derived from the body if omitted. to: an agent name, '*' for everyone, '#channel', or 'user'. reply_to joins that message's thread and marks a question answered. Returns id and thread_id: to wait for an answer, call message_wait(thread_id, after_id=id). sender: your agent type/name; pass it when you are a subagent, since subagents share one connection. Never include secrets; bodies are capped at 8,000 characters.")
+def message_post(body: str, to: str = "*", subject: str | None = None, kind: str = "message", reply_to: int | None = None, sender: str | None = None, ctx: Context | None = None) -> dict:
+    def work():
+        _, project = _client()
+        declared = bool((sender or "").strip()) and sender.strip() != _client_name
+        with connection() as conn:
+            message_id = messages.post(conn, body, sender=_me(sender), sender_kind=_sender_kind(declared), to=to, subject=subject, kind=kind,
+                                       reply_to=reply_to, project=project, declared=declared)
+            return {"id": message_id, "thread_id": conn.execute("SELECT thread_id FROM messages WHERE id=?", (message_id,)).fetchone()[0]}
+    return _call("message_post", {"to": to, "kind": kind, "reply_to": reply_to, "sender": sender}, work, ctx)
+
+
+@mcp.tool(description="Check messages for you: those addressed to you, to '*', or to channels you posted in. Call at the start of work and before finishing. With unread_only (the default) the returned messages are marked read for you; unread_only=False re-reads history without marking anything. reader: the same name you pass as sender (subagents share one connection).")
+def message_inbox(unread_only: bool = True, limit: int = 20, reader: str | None = None, ctx: Context | None = None) -> list[dict]:
+    def work():
+        with connection() as conn:
+            return messages.inbox(conn, _me(reader), unread_only, limit)
+    return _call("message_inbox", {"unread_only": unread_only, "limit": limit, "reader": reader}, work, ctx)
+
+
+@mcp.tool(description="Return every message of one thread, oldest first.")
+def message_thread(thread_id: int, ctx: Context | None = None) -> list[dict]:
+    def work():
+        with connection() as conn:
+            return messages.thread(conn, thread_id)
+    return _call("message_thread", {"thread_id": thread_id}, work, ctx)
+
+
+@mcp.tool(description="Wait for a reply in a thread instead of sleeping: returns messages newer than after_id as soon as one lands (checked every 2 s), or timed_out after timeout_s (max 60). Pass after_id = the id message_post returned, then the last_id of each result on the next call, so no reply is missed. Without after_id it starts after your own newest message in the thread (reader = your sender name), else after the thread's first message.")
+async def message_wait(thread_id: int, timeout_s: int = 60, after_id: int | None = None, reader: str | None = None, ctx: Context | None = None) -> dict:
+    started = time.monotonic()
+    timeout = max(0, min(int(timeout_s), WAIT_MAX_S))
+    args = {"thread_id": thread_id, "timeout_s": timeout_s, "after_id": after_id, "reader": reader}
+
+    def read(after: int | None):
+        with connection() as conn:
+            if after is None:
+                if not conn.execute("SELECT 1 FROM messages WHERE thread_id=?", (thread_id,)).fetchone(): raise ValueError(f"thread {thread_id} does not exist")
+                # fix(2026-10-28): the baseline used to be the newest id at call time, so a reply that landed before the wait was never returned.
+                return messages.wait_baseline(conn, thread_id, _me(reader))
+            return messages.newer(conn, thread_id, after)
+
+    try:
+        _client(ctx)
+        after = await asyncio.to_thread(read, None) if after_id is None else int(after_id)
+        if after_id is not None: await asyncio.to_thread(read, None)  # still reject an unknown thread
+        while True:
+            # Async with a thread hop: a blocking wait would stall every other tool call on this shared connection.
+            replies = await asyncio.to_thread(read, after)
+            if replies or time.monotonic() - started >= timeout:
+                result = {"thread_id": thread_id, "messages": replies, "timed_out": not replies, "last_id": max([after, *(m["id"] for m in replies)])}
+                break
+            await asyncio.sleep(min(WAIT_POLL_S, max(0.0, timeout - (time.monotonic() - started))))
+    except Exception as exc:
+        error = exc
+        def fail(): raise error
+        return _call("message_wait", args, fail, ctx, started)
+    return _call("message_wait", args, lambda: result, ctx, started)
+
+
+@mcp.tool(description="Close a thread once it is resolved; the user can reopen it from the panel.")
+def message_close(thread_id: int, ctx: Context | None = None) -> dict:
+    def work():
+        with connection() as conn:
+            return {"closed": messages.close(conn, thread_id)}
+    return _call("message_close", {"thread_id": thread_id}, work, ctx)
 
 
 def _shutdown() -> None:

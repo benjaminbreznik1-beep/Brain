@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import PurePath
 from typing import Any
 
+from .. import messages
 from ..db import SCHEMA_VERSION, parse_ts
 
 STALE_AFTER_S = 6 * 3600
@@ -178,6 +179,14 @@ def recent_sessions(conn) -> list[dict[str, Any]]:
         if (parse_ts(u["ts"]) or _now()) > (parse_ts(s["last_ts"]) or _now()):
             s["last_ts"] = u["ts"]
         s["project"] = s["project"] or u["project"]
+    for a in _rows(conn, """SELECT s.agent_id,s.project,s.last_activity_at,s.model,
+        (SELECT name FROM subagent_tools t WHERE t.agent_id=s.agent_id ORDER BY source_offset DESC LIMIT 1) last_tool,
+        (SELECT arg FROM subagent_tools t WHERE t.agent_id=s.agent_id ORDER BY source_offset DESC LIMIT 1) last_summary
+        FROM subagents s WHERE s.agent_kind='codex' AND datetime(COALESCE(s.last_activity_at,s.started_at)) >= datetime('now', ?)""", (window,)):
+        key = ("codex", a["agent_id"])
+        s = sessions.setdefault(key, {"agent": "codex", "session_id": a["agent_id"], "project": a["project"], "last_ts": a["last_activity_at"],
+                                      "last_tool": a["last_tool"], "last_summary": a["last_summary"] or "", "tools_10m": 0, "tokens_10m": 0, "model": a["model"]})
+        s["last_tool"], s["last_summary"], s["model"] = a["last_tool"] or s["last_tool"], a["last_summary"] or s["last_summary"], a["model"] or s["model"]
     now = _now()
     out = []
     for s in sessions.values():
@@ -298,7 +307,8 @@ def build_state(conn) -> dict[str, Any]:
     state = {
         "now": _iso(_now()), "schema_version": SCHEMA_VERSION,
         "limits": limits(conn), "tokens": tokens(conn),
-        "agents": {"connected": clients, "sessions": sessions},
+        "agents": {"connected": clients, "sessions": sessions,
+                   "subagents": messages.session_subagents(conn, [s["session_id"] for s in sessions if s["agent"].startswith("claude")])},
         "activity": activity(conn), "graph": g, "graph_sig": graph_signature(g),
         "counts": memory_counts(conn), "cursor": cursor(conn),
     }

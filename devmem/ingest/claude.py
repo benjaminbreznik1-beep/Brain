@@ -21,6 +21,11 @@ def safe_summary(tool_input: Any) -> str:
     return ""
 
 
+def _str(value) -> str | None:
+    """Logs are not trusted to be well-typed: a dict where a string belongs would make SQLite reject the whole file."""
+    return value if isinstance(value, str) and value else None
+
+
 def _usage(obj: dict[str, Any]) -> dict[str, Any] | None:
     message = obj.get("message") or {}
     if not isinstance(message, dict):
@@ -31,8 +36,8 @@ def _usage(obj: dict[str, Any]) -> dict[str, Any] | None:
     details = usage.get("output_tokens_details") or {}
     return {
         "agent": "claude",
-        "session_id": obj.get("sessionId"), "project": obj.get("cwd"),
-        "model": message.get("model", "claude"), "ts": obj.get("timestamp"),
+        "session_id": _str(obj.get("sessionId")), "project": _str(obj.get("cwd")),
+        "model": _str(message.get("model")) or "claude", "ts": _str(obj.get("timestamp")),
         "input_tokens": int(usage.get("input_tokens", 0) or 0),
         "output_tokens": int(usage.get("output_tokens", 0) or 0),
         "cache_read_tokens": int(usage.get("cache_read_input_tokens", 0) or 0),
@@ -55,8 +60,8 @@ def _activities(obj: dict[str, Any]) -> list[dict[str, Any]]:
     for item in content:
         if isinstance(item, dict) and item.get("type") == "tool_use":
             events.append({
-                "agent": agent, "session_id": obj.get("sessionId"), "project": obj.get("cwd"),
-                "ts": obj.get("timestamp"), "kind": "tool", "name": str(item.get("name") or "tool")[:80],
+                "agent": agent, "session_id": _str(obj.get("sessionId")), "project": _str(obj.get("cwd")),
+                "ts": _str(obj.get("timestamp")), "kind": "tool", "name": str(item.get("name") or "tool")[:80],
                 "summary": safe_summary(item.get("input")),
             })
     return events

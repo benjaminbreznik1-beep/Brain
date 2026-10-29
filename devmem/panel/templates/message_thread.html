@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block title %}Thread · Brain{% endblock %}
+{% macro tools(agent, open=False) %}
+<details class="tool-lines"{% if open %} open{% endif %}><summary>{{ agent.tools | length }} tool calls · {{ agent.status }}{% if agent.tokens %} · <span data-tokens="{{ agent.tokens }}">{{ agent.tokens }}</span> tokens{% endif %}</summary>
+<ol>{% for t in agent.tools %}<li><span class="mono tool">{{ t.name }}</span> <span class="muted">{{ t.arg }}</span></li>{% else %}<li class="muted">No tool calls yet.</li>{% endfor %}</ol></details>
+{% endmacro %}
+{% block body %}
+<div class="page-title-row">
+  <h1>{{ root.subject or root.body[:80] }}</h1>
+  <div class="form-row">
+    <span class="badge st-{{ root.status }}">{{ root.status }}</span>
+    {% if root.status == 'closed' %}
+    <form method="post" action="/messages/thread/{{ root.id }}/reopen"><button>Reopen</button></form>
+    {% else %}
+    <form method="post" action="/messages/thread/{{ root.id }}/close"><button>Close thread</button></form>
+    {% endif %}
+  </div>
+</div>
+<p class="muted"><a href="/messages{% if chat_key %}?chat={{ chat_key | urlencode }}{% endif %}">← chat</a>{% if root.project %} · <span class="mono">{{ root.project }}</span>{% endif %}</p>
+
+{% for m in items %}
+<article class="card msg msg-{{ m.kind }}">
+  <header class="msg-head">
+    <span class="mono">{{ m.sender }}</span>{% if m.sender_declared %} <span class="badge declared">self-declared</span>{% endif %}
+    <span class="muted">({{ m.sender_kind }}) → <span class="mono">{{ m.recipient }}</span></span>
+    <span class="badge msg-{{ m.kind }}">{{ m.kind }}</span>{% if m.kind == 'question' %} <span class="badge st-{{ m.status }}">{{ m.status }}</span>{% endif %}
+    <time data-rel datetime="{{ m.created_at }}">{{ m.created_at }}</time>
+  </header>
+  {% set agent = agents.get(m.agent_id) if m.agent_id else None %}
+  {% if agent and m.id == agent.spawn_msg_id %}
+    <p><b>Agent started</b> · <a href="/messages/agent/{{ agent.agent_id }}">{{ agent.agent_type or 'subagent' }}</a>{% if agent.description %} · {{ agent.description }}{% endif %}</p>
+    <details><summary>Task</summary><pre class="msg-body">{{ m.body }}</pre></details>
+    {{ tools(agent) }}
+  {% elif agent and m.id == agent.report_msg_id %}
+    <p><b>Final report</b></p>
+    <pre class="msg-body">{{ m.body }}</pre>
+  {% else %}
+    {% if m.subject and not loop.first %}<p><b>{{ m.subject }}</b></p>{% endif %}
+    <pre class="msg-body">{{ m.body }}</pre>
+  {% endif %}
+</article>
+{% endfor %}
+
+<form method="post" action="/messages/thread/{{ root.id }}/reply" class="card">
+  <label class="muted" for="reply-body">Reply as user; an agent waiting in <span class="mono">message_wait</span> gets it right away.</label>
+  <textarea id="reply-body" name="body" required maxlength="8000"></textarea>
+  <button>Send reply</button>
+</form>
+{% endblock %}

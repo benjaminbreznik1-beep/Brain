@@ -7,7 +7,7 @@ import sqlite3
 import hashlib
 import sys
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
@@ -16,7 +16,7 @@ import numpy as np
 
 from .embed import EMBEDDING_DIM, EMBEDDING_MODEL, get_embedder
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 12
 DEFAULT_MAX_CONTENT = 2000
 # bge-small-en-v1.5 scores unrelated text ~0.45-0.59 and real matches ~0.65+ (measured on ~40 memories, 2026-10).
 MIN_COSINE = 0.6
@@ -177,6 +177,18 @@ def migrate(conn: sqlite3.Connection) -> None:
         _migrate_v5(conn)
     if version < 6:
         _migrate_v6(conn)
+    if version < 7:
+        _migrate_v7(conn)
+    if version < 8:
+        _migrate_v8(conn)
+    if version < 9:
+        _migrate_v9(conn)
+    if version < 10:
+        _migrate_v10(conn)
+    if version < 11:
+        _migrate_v11(conn)
+    if version < 12:
+        _migrate_v12(conn)
 
 
 _V2_STATEMENTS = (
@@ -333,8 +345,15 @@ def _backup_before_migration(conn: sqlite3.Connection, new_version: int, old_ver
         if destination.exists():
             raise FileExistsError(destination)
         source_path = next(row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main")
-        with sqlite3.connect(source_path) as source, sqlite3.connect(destination) as backup:
-            source.backup(backup)
+        # fix(2026-10-28): write to .tmp and rename, so a half-written file never matches the "backup exists" glob.
+        partial = destination.with_name(destination.name + ".tmp")
+        try:
+            source, backup = sqlite3.connect(source_path), sqlite3.connect(partial)
+            try: source.backup(backup)
+            finally: source.close(); backup.close()
+            os.replace(partial, destination)
+        except BaseException:
+            partial.unlink(missing_ok=True); raise
     except Exception as exc:
         raise RuntimeError(f"devmem migration backup failed ({destination}): {exc}") from exc
 
@@ -366,6 +385,222 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
     except Exception:
         conn.rollback()
         raise
+
+
+_V7_STATEMENTS = (
+    """CREATE TABLE IF NOT EXISTS maintenance_runs (
+      id INTEGER PRIMARY KEY, trigger TEXT NOT NULL CHECK(trigger IN ('startup','session_end','manual')),
+      project TEXT, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+      engine TEXT, model TEXT, checked INTEGER DEFAULT 0, applied INTEGER DEFAULT 0, flagged INTEGER DEFAULT 0, error TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS maintenance_changes (
+      id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, memory_id INTEGER NOT NULL, target_id INTEGER,
+      action TEXT NOT NULL CHECK(action IN ('update','merge','supersede','keep','flag')),
+      applied INTEGER NOT NULL, summary TEXT NOT NULL, evidence TEXT NOT NULL,
+      old_title TEXT, old_content TEXT, new_title TEXT, new_content TEXT,
+      revision_id INTEGER, link_id INTEGER, blocked_by TEXT,
+      reverted_at TEXT, created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS maintenance_changes_run ON maintenance_changes(run_id, id DESC)",
+    "CREATE INDEX IF NOT EXISTS maintenance_changes_memory ON maintenance_changes(memory_id, created_at DESC)",
+)
+
+
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """v6 -> v7. Maintenance history is additive; migrate() took the backup."""
+    conn.commit(); conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 7:
+            for statement in _V7_STATEMENTS: conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=7")
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+
+
+_V8_COLUMNS = (
+    # full=1 marks an unlimited, project-less, non-dry run: only those reset the startup window.
+    ("maintenance_runs", "full", "INTEGER NOT NULL DEFAULT 0"),
+    ("maintenance_runs", "options", "TEXT"),  # JSON for queued requests, e.g. the transcript path
+    ("maintenance_runs", "note", "TEXT"),
+    ("maintenance_changes", "old_review_after", "TEXT"),
+    ("maintenance_changes", "new_review_after", "TEXT"),
+    ("maintenance_changes", "seen_at", "TEXT"),
+)
+
+
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """v7 -> v8. Additive maintenance bookkeeping; skips columns that exist (v7 tables are CREATE IF NOT EXISTS)."""
+    conn.commit(); conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 8:
+            for table, column, declaration in _V8_COLUMNS:
+                if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            conn.execute("UPDATE schema_version SET version=8")
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+
+
+_V9_STATEMENTS = (
+    # thread_id is the root message's id; a thread's status is its root's status.
+    """CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY, thread_id INTEGER, reply_to INTEGER, project TEXT, sender TEXT NOT NULL,
+      sender_kind TEXT NOT NULL CHECK(sender_kind IN ('claude','subagent','codex','user','system')),
+      sender_declared INTEGER NOT NULL DEFAULT 0, recipient TEXT NOT NULL DEFAULT '*',
+      kind TEXT NOT NULL CHECK(kind IN ('message','question','finding','event')), subject TEXT, body TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','answered','closed')),
+      created_at TEXT NOT NULL, closed_at TEXT, agent_id TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS message_reads (
+      message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE, reader TEXT NOT NULL, read_at TEXT NOT NULL,
+      PRIMARY KEY(message_id, reader)
+    )""",
+    # Claude Code subagents seen in ~/.claude/projects/<proj>/<session>/subagents; offset is this table's own read position.
+    """CREATE TABLE IF NOT EXISTS subagents (
+      agent_id TEXT PRIMARY KEY, session_id TEXT, project TEXT, agent_type TEXT, description TEXT, tool_use_id TEXT,
+      spawn_depth INTEGER, started_at TEXT, last_activity_at TEXT, finished INTEGER NOT NULL DEFAULT 0,
+      task TEXT, last_text TEXT, source_file TEXT, byte_offset INTEGER NOT NULL DEFAULT 0, meta_mtime REAL,
+      spawn_msg_id INTEGER, report_msg_id INTEGER
+    )""",
+    """CREATE TABLE IF NOT EXISTS subagent_tools (
+      id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, ts TEXT, name TEXT NOT NULL, arg TEXT NOT NULL DEFAULT '',
+      source_offset INTEGER NOT NULL, UNIQUE(agent_id, source_offset)
+    )""",
+    "CREATE INDEX IF NOT EXISTS messages_thread ON messages(thread_id, id)",
+    "CREATE INDEX IF NOT EXISTS messages_sender_created ON messages(sender, created_at)",
+    "CREATE INDEX IF NOT EXISTS subagents_session ON subagents(session_id, last_activity_at)",
+)
+
+
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """v8 -> v9. Agent messages and live subagents; additive, migrate() took the backup."""
+    conn.commit(); conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 9:
+            for statement in _V9_STATEMENTS: conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=9")
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+
+
+_V10_COLUMNS = (
+    # last_terminal: the newest record ends the run (SubagentHandback, its result, or an end_turn text); meta "finished" is often never written.
+    ("subagents", "last_terminal", "INTEGER NOT NULL DEFAULT 0"),
+    ("subagents", "tail_partial", "INTEGER NOT NULL DEFAULT 0"),  # the log ended in an unterminated line at the last read
+    ("subagents", "ended", "TEXT"),  # finished | stopped, once the report event is posted
+)
+_V10_STATEMENTS = (
+    # Assistant remarks between tool calls (role agent) and later parent messages (role parent); never thinking or tool results.
+    """CREATE TABLE IF NOT EXISTS subagent_texts (
+      id INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, ts TEXT, role TEXT NOT NULL CHECK(role IN ('agent','parent')), body TEXT NOT NULL,
+      source_offset INTEGER NOT NULL, UNIQUE(agent_id, source_offset)
+    )""",
+    "CREATE INDEX IF NOT EXISTS messages_agent ON messages(agent_id)",
+    # Re-read every subagent log once so remarks and the end-of-run marker exist for agents scanned under v9.
+    "UPDATE subagents SET byte_offset=0",
+)
+
+
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """v9 -> v10. Subagent remarks and end-of-run detection; additive, migrate() took the backup."""
+    conn.commit(); conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 10:
+            for table, column, declaration in _V10_COLUMNS:
+                if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            for statement in _V10_STATEMENTS: conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=10")
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+
+
+_V11_COLUMNS = (
+    ("subagents", "agent_kind", "TEXT NOT NULL DEFAULT 'subagent'"),
+    ("subagents", "model", "TEXT"),
+    ("subagents", "handoff_id", "TEXT"),
+    ("subagents", "handoff_session_id", "TEXT"),
+)
+_V11_STATEMENTS = (
+    "CREATE INDEX IF NOT EXISTS subagents_handoff ON subagents(handoff_session_id, last_activity_at)",
+    "UPDATE ingest_offsets SET byte_offset=0 WHERE source_file LIKE '%/sessions/%'",
+)
+
+
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """v10 -> v11. Codex rollout identities and conservative Claude handoff links; migrate() took the backup."""
+    conn.commit(); conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 11:
+            for table, column, declaration in _V11_COLUMNS:
+                if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+            for statement in _V11_STATEMENTS: conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=11")
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+
+
+def _migrate_v12(conn: sqlite3.Connection) -> None:
+    """Add durable user-message dispatch jobs; migrate() took the backup."""
+    conn.commit(); conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS message_jobs (
+            id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+            chat_key TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', agent TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, error TEXT
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS message_jobs_queue ON message_jobs(state,id)")
+        conn.execute("UPDATE schema_version SET version=12")
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+
+
+def maintenance_failing_since(conn: sqlite3.Connection) -> dict | None:
+    """{since, error} while the newest maintenance runs failed (or one is stuck running for 6 h+); None when healthy."""
+    try:
+        rows = conn.execute("SELECT status,started_at,error FROM maintenance_runs WHERE status IN ('success','error','running') ORDER BY id DESC LIMIT 100").fetchall()
+    except sqlite3.OperationalError:  # read-only connection to a pre-v7 database
+        return None
+    failing = None
+    for row in rows:
+        started = parse_ts(row["started_at"])
+        if row["status"] == "success": break
+        if row["status"] == "running":
+            if not started or datetime.now(UTC) - started < timedelta(hours=6): continue
+            row = {"started_at": row["started_at"], "error": "a run has been stuck for over 6 hours"}
+        failing = {"since": row["started_at"], "error": (failing or {}).get("error") or row["error"] or "unknown error"}
+    return failing
+
+
+def restore_memory(conn: sqlite3.Connection, id: int, revision_id: int, source_agent: str) -> None:
+    """Restore a revision using the same safeguards for MCP and maintenance reverts."""
+    row = conn.execute("SELECT * FROM memory_revisions WHERE id=? AND memory_id=?", (revision_id, id)).fetchone()
+    if not row:
+        raise ValueError("revision does not belong to memory")
+    existing = conn.execute("SELECT created_at FROM memories WHERE id=?", (id,)).fetchone()
+    if existing and row["created_at"] is not None and existing["created_at"] != row["created_at"]:
+        # SQLite reuses the highest id after a delete, so this id may now be another memory.
+        raise ValueError("memory id was reused by a newer memory; save the revision as a new memory instead")
+    if existing:
+        conn.execute("UPDATE memories SET project=?,kind=?,title=?,content=?,tags=?,pinned=?,updated_at=? WHERE id=?",
+                     (row["project"], row["kind"], row["title"], row["content"], row["tags"], row["pinned"], now(), id))
+    else:
+        conn.execute("""INSERT INTO memories(id,project,kind,title,content,tags,pinned,created_at,updated_at,source_agent)
+            VALUES(?,?,?,?,?,?,?,?,?,?)""", (id, row["project"], row["kind"], row["title"], row["content"], row["tags"],
+                                                row["pinned"], row["created_at"] or now(), now(), source_agent))
+        if row["op"] == "delete":
+            conn.execute("""INSERT OR IGNORE INTO memory_links(from_id,to_id,type,note,created_at)
+                SELECT from_id,to_id,type,note,created_at FROM memory_link_revisions
+                WHERE memory_revision_id=? AND (from_id=? OR to_id=?)
+                  AND EXISTS(SELECT 1 FROM memories WHERE id=CASE WHEN from_id=? THEN to_id ELSE from_id END)""",
+                         (revision_id, id, id, id))
 
 
 def parse_ts(value) -> datetime | None:
@@ -487,7 +722,7 @@ def _bm25_candidates(conn: sqlite3.Connection, query: str, where_sql: str, param
     match = fts_query(query)
     if not match:
         return []
-    clauses, values = [f"({where_sql})", "memories_fts MATCH ?"], list(params) + [match]
+    clauses, values = [f"({where_sql})", "memories_fts MATCH ?", "NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=m.id AND sl.type='supersedes')"], list(params) + [match]
     if kind:
         clauses.append("m.kind=?")
         values.append(kind)
@@ -523,7 +758,7 @@ def hybrid_search(conn: sqlite3.Connection, query: str, *, where_sql: str, param
     if normalised_query is None:
         return keyword[:limit]
 
-    clauses, values = [f"({where_sql})", "e.model=?", "e.dim=?"], list(params) + [EMBEDDING_MODEL, EMBEDDING_DIM]
+    clauses, values = [f"({where_sql})", "e.model=?", "e.dim=?", "NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=m.id AND sl.type='supersedes')"], list(params) + [EMBEDDING_MODEL, EMBEDDING_DIM]
     if kind:
         clauses.append("m.kind=?")
         values.append(kind)
@@ -583,7 +818,8 @@ def project_for_cwd(cwd: str | None) -> str | None:
 def context_text(conn: sqlite3.Connection, project: str | None) -> str:
     """Render the compact project and global-memory briefing."""
     current_date = today_utc()
-    pinned_rows = conn.execute("SELECT id,kind,title,content,project FROM memories WHERE pinned=1 AND (review_after IS NULL OR review_after>=?) ORDER BY updated_at DESC", (current_date,)).fetchall()
+    visible = "NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=memories.id AND sl.type='supersedes')"
+    pinned_rows = conn.execute(f"SELECT id,kind,title,content,project FROM memories WHERE pinned=1 AND ({visible}) AND (review_after IS NULL OR review_after>=?) ORDER BY updated_at DESC", (current_date,)).fetchall()
     pinned_text, cap, last_id = "", 6000 - len("## Pinned\n"), None
     for row in pinned_rows:
         name = (Path(row["project"]).name or row["project"]) if row["project"] else "global"
@@ -605,13 +841,15 @@ def context_text(conn: sqlite3.Connection, project: str | None) -> str:
             pinned_text += "\n"
         pinned_text += note
         break
-    rows = conn.execute("""SELECT kind,title,content FROM memories WHERE pinned=0 AND project=? AND kind IN ('decision','preference','todo','note')
+    rows = conn.execute(f"""SELECT kind,title,content FROM memories WHERE pinned=0 AND project=? AND kind IN ('decision','preference','todo','note') AND ({visible})
         AND (review_after IS NULL OR review_after>=?) ORDER BY kind='note', updated_at DESC LIMIT 20""", (project, current_date)).fetchall()
-    global_rows = conn.execute("""SELECT kind,title,content FROM memories WHERE pinned=0 AND project IS NULL AND kind IN ('decision','preference')
+    global_rows = conn.execute(f"""SELECT kind,title,content FROM memories WHERE pinned=0 AND project IS NULL AND kind IN ('decision','preference') AND ({visible})
         AND (review_after IS NULL OR review_after>=?) ORDER BY updated_at DESC LIMIT 40""", (current_date,)).fetchall()
     text = "\n".join(f"[{r['kind']}] {r['title']}: {r['content'][:200]}" for r in rows)[:1500]
     global_text = "\n".join(f"[{r['kind']}] {r['title']}" for r in global_rows)[:3000]  # titles state the rule; memory_get has the detail
-    parts = [f"## Pinned\n{pinned_text}" if pinned_text else "", f"## Project\n{text}" if text else "", f"## Global preferences\n{global_text}" if global_text else ""]
+    failing = maintenance_failing_since(conn)
+    failing_text = f"Automatic maintenance failing since {failing['since'][:16]}: {failing['error'][:160]} (see the panel's Maintenance page)" if failing else ""
+    parts = [f"## Pinned\n{pinned_text}" if pinned_text else "", f"## Project\n{text}" if text else "", f"## Global preferences\n{global_text}" if global_text else "", f"## Maintenance\n{failing_text}" if failing_text else ""]
     return "\n\n".join(p for p in parts if p) or "No saved project context."
 
 
@@ -633,7 +871,8 @@ def audit_memories(conn: sqlite3.Connection) -> list[dict]:
     """Return report-only context-rot findings, sorted by category then largest memory."""
     cap, today = max_content(), today_utc()
     terms = _outdated_terms()
-    rows = [dict(row) for row in conn.execute("SELECT id,title,content,project,updated_at,review_after FROM memories").fetchall()]
+    rows = [dict(row) for row in conn.execute("""SELECT id,title,content,project,updated_at,review_after FROM memories
+        WHERE NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=memories.id AND sl.type='supersedes')""").fetchall()]
     findings = []
     for row in rows:
         base = {key: row[key] for key in ("id", "title", "updated_at")}
@@ -651,7 +890,8 @@ def audit_memories(conn: sqlite3.Connection) -> list[dict]:
             findings.append({**base, "reason": "outdated wording: " + ", ".join(matched)})
 
     embedded = conn.execute("""SELECT m.id,m.title,m.content,m.project,m.updated_at,e.vec
-        FROM memories m JOIN memory_embeddings e ON e.memory_id=m.id WHERE e.model=? AND e.dim=? ORDER BY m.id""",
+        FROM memories m JOIN memory_embeddings e ON e.memory_id=m.id WHERE e.model=? AND e.dim=?
+        AND NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=m.id AND sl.type='supersedes') ORDER BY m.id""",
                             (EMBEDDING_MODEL, EMBEDDING_DIM)).fetchall()
     for index, left in enumerate(embedded):
         left_vector = np.frombuffer(left["vec"], dtype="<f4")

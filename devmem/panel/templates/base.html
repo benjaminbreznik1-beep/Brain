@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Brain{% endblock %}</title>
-  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="{{ asset('site.css') }}">
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}">
@@ -16,8 +16,10 @@
       <a href="/projects" class="{{ 'on' if active in ('projects', 'project') }}">Projects</a>
       <a href="/sessions" class="{{ 'on' if active in ('sessions', 'session') }}">Sessions</a>
       <a href="/agents" class="{{ 'on' if active == 'agents' }}">Agents</a>
+      <a href="/messages" class="{{ 'on' if active == 'messages' }}">Messages <span class="msg-badge" id="nav-msg-badge" title="Unread questions and open threads addressed to you"{% if not messages_badge %} hidden{% endif %}>{{ messages_badge or 0 }}</span></a>
       <a href="/memory" class="{{ 'on' if active == 'memory' }}">Memory</a>
       <a href="/audit" class="{{ 'on' if active == 'audit' }}">Audit</a>
+      <a href="/maintenance" class="{{ 'on' if active == 'maintenance' }}">Maintenance{% if maintenance_count %} <span class="ado-change-badge" title="Applied changes or open flags">!</span>{% endif %}</a>
       <a href="/ado" class="{{ 'on' if active == 'ado' }}">ADO <span class="ado-change-badge" hidden title="ADO changed since you last looked">!</span></a>
     </nav>
     <span class="spacer"></span>
@@ -28,7 +30,7 @@
     {% block body %}{% endblock %}
   </main>
   {% endblock %}
-  <script src="/static/common.js"></script>
+  <script src="{{ asset('common.js') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

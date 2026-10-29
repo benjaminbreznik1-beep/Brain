@@ -2,15 +2,41 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
 
 from ..db import connection, iso, parse_ts, project_for_cwd
-from . import claude, codex
+from . import claude, codex, subagents
 
 CLAUDE_LIMIT_WINDOWS = {"five_hour": 300}
 RESET_TOLERANCE_S = 120  # resets derived from "resets_in_seconds" jitter by a second or two per event
+log = logging.getLogger("devmem.ingest")
+_FAILED: set[tuple[str, int | None, str]] = set()
+
+
+class _LineFailed(Exception):
+    """A line that could not be stored; carries its byte offset for the log."""
+    def __init__(self, offset: int): super().__init__(offset); self.offset = offset
+
+
+def _guarded(conn, path, fn, default, reset=None):
+    """Run one file's ingest inside a SAVEPOINT: a bad file is rolled back, logged once, and skipped; the rest of the pass goes on."""
+    conn.execute("SAVEPOINT ingest_file")
+    try:
+        result = fn()
+    except Exception as exc:
+        conn.execute("ROLLBACK TO ingest_file"); conn.execute("RELEASE ingest_file")
+        if reset: reset()  # caches that may describe rolled-back rows
+        if isinstance(exc, FileNotFoundError): return default  # removed between stat and open: gone, nothing to keep
+        cause = exc.__cause__ if isinstance(exc, _LineFailed) and exc.__cause__ else exc
+        key = (str(path), getattr(exc, "offset", None), type(cause).__name__)
+        if key not in _FAILED:
+            _FAILED.add(key); log.warning("ingest skipped %s at byte %s: %s: %s", path, key[1], key[2], cause)
+        return default
+    conn.execute("RELEASE ingest_file")
+    return result
 
 
 def claude_limits_path() -> Path:
@@ -148,7 +174,7 @@ def ingest_file(conn, path: Path, parser: str, known: dict[str, int] | None = No
     if size < start:
         start = 0  # truncated or rotated
     store = store or LimitStore(conn)
-    count, activities, end, seen = 0, 0, start, set()
+    count, end, seen = 0, start, set()
     context: dict = {}
     if parser == "codex" and start:
         try:
@@ -165,47 +191,104 @@ def ingest_file(conn, path: Path, parser: str, known: dict[str, int] | None = No
         if line is None:
             break
         end = next_at
-        if parser == "claude":
-            event, acts = claude.parse_record(line)
-            activities += _insert_activities(conn, acts, source, at)
-            if event:
-                key = event.pop("dedup_key")
-                if key != (None, None) and key in seen:
-                    continue
-                seen.add(key)
-                if key != (None, None):
-                    if conn.execute("INSERT OR IGNORE INTO usage_dedup(agent,dedup_key) VALUES('claude',?)", (json.dumps(key),)).rowcount == 0:
-                        continue
-                count += _insert_event(conn, event, source, at)
-        else:
-            event, limits, acts = codex.parse_record(line, context)
-            activities += _insert_activities(conn, acts, source, at)
-            if event:
-                count += _insert_event(conn, event, source, at)
-            for limit in limits:
-                store.observe(limit)
+        try:
+            count += _ingest_line(conn, parser, line, source, at, seen, context, store, stats)
+        except Exception as exc:
+            raise _LineFailed(at) from exc
     conn.execute("INSERT INTO ingest_offsets(source_file,byte_offset,context) VALUES (?,?,?) "
                  "ON CONFLICT(source_file) DO UPDATE SET byte_offset=excluded.byte_offset, context=excluded.context",
                  (source, end, json.dumps(context) if parser == "codex" and context else None))
+    if parser == "codex" and isinstance(context.get("session_id"), str):
+        conn.execute("UPDATE subagents SET tail_partial=? WHERE agent_id=?", (int(end < size), context["session_id"]))
     if known is not None:
         known[source] = end
+    return count
+
+
+def _ingest_line(conn, parser: str, line: str, source: str, at: int, seen: set, context: dict, store: LimitStore, stats: dict[str, int] | None) -> int:
+    count = activities = 0
+    if parser == "claude":
+        event, acts = claude.parse_record(line)
+        activities += _insert_activities(conn, acts, source, at)
+        if event:
+            key = event.pop("dedup_key")
+            fresh = key == (None, None) or key not in seen
+            if fresh and key != (None, None):
+                seen.add(key)
+                fresh = conn.execute("INSERT OR IGNORE INTO usage_dedup(agent,dedup_key) VALUES('claude',?)", (json.dumps(key),)).rowcount > 0
+            if fresh:
+                count += _insert_event(conn, event, source, at)
+    else:
+        event, limits, acts = codex.parse_record(line, context)
+        rec = codex.parse_agent_record(line, context)
+        if rec:
+            subagents.apply_codex(conn, rec, source, at)
+        activities += _insert_activities(conn, acts, source, at)
+        if event:
+            count += _insert_event(conn, event, source, at)
+        for limit in limits:
+            store.observe(limit)
     if stats is not None:
         stats["activity"] = stats.get("activity", 0) + activities
     return count
 
 
+def ingest_subagent_file(conn, path: Path, known: dict[str, int] | None = None) -> bool:
+    """Read new lines of one subagent log into subagents/subagent_tools, from that table's own offset.
+
+    The offset is separate from ingest_offsets so logs already counted for tokens before v9 are still read once here.
+    """
+    aid = subagents.agent_id(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if aid is None or (known is not None and known.get(aid) == size):
+        return False
+    row = conn.execute("SELECT byte_offset FROM subagents WHERE agent_id=?", (aid,)).fetchone()
+    start = int(row[0]) if row else 0
+    if start == size:
+        return False
+    if size < start:
+        start = 0
+    subagents.ensure(conn, aid, str(path), path.parent.parent.name)
+    end = start
+    for at, line, next_at in _read_new(path, start):
+        if line is None:
+            break
+        end = next_at
+        try:
+            rec = subagents.parse(line)
+            if rec:
+                subagents.apply(conn, aid, rec, at)
+        except Exception as exc:
+            raise _LineFailed(at) from exc
+    # tail_partial: the last line is still being written, so the newest complete record may not be the run's end.
+    conn.execute("UPDATE subagents SET byte_offset=?,source_file=?,tail_partial=? WHERE agent_id=?", (end, str(path), int(end < size), aid))
+    if known is not None:
+        known[aid] = end
+    return True
+
+
 def ingest_all(claude_root: Path | None = None, codex_root: Path | None = None, limits_path: Path | None = None,
                stats: dict[str, int] | None = None) -> int:
     """One incremental pass over all logs; return the number of new usage events."""
-    claude_root = claude_root or Path.home() / ".claude"
-    codex_root = codex_root or Path.home() / ".codex"
+    claude_root = claude_root or Path(os.environ.get("DEVMEM_CLAUDE_HOME", "~/.claude")).expanduser()
+    codex_root = codex_root or Path(os.environ.get("DEVMEM_CODEX_HOME", "~/.codex")).expanduser()
     total = 0
     with connection() as conn:
         known = {r[0]: int(r[1]) for r in conn.execute("SELECT source_file,byte_offset FROM ingest_offsets")}
+        known_agents = {r[0]: int(r[1]) for r in conn.execute("SELECT agent_id,byte_offset FROM subagents")}
         store = LimitStore(conn)
+        # fix(2026-10-28): every file (and each subagent step) runs in its own SAVEPOINT; one bad log never freezes usage ingest.
+        _guarded(conn, claude_root, lambda: subagents.scan_meta(conn, claude_root), 0)  # first, so spawn events carry type and description
         for path in claude.files(claude_root):
-            total += ingest_file(conn, path, "claude", known, store, stats)
+            total += _guarded(conn, path, lambda: ingest_file(conn, path, "claude", known, store, stats), 0, store.last.clear)
+            if subagents.agent_id(path):
+                _guarded(conn, path, lambda: ingest_subagent_file(conn, path, known_agents), False)
         for path in sorted(codex.files(codex_root)):
-            total += ingest_file(conn, path, "codex", known, store, stats)
-        ingest_claude_limits(conn, limits_path, store)
+            total += _guarded(conn, path, lambda: ingest_file(conn, path, "codex", known, store, stats), 0, store.last.clear)
+        _guarded(conn, "Codex handoff links", lambda: subagents.link_codex_handoffs(conn, claude_root), None)
+        _guarded(conn, "subagent events", lambda: subagents.emit_events(conn), 0)
+        _guarded(conn, limits_path or claude_limits_path(), lambda: ingest_claude_limits(conn, limits_path, store), 0, store.last.clear)
     return total

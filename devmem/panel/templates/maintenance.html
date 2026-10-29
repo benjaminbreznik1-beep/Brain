@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block title %}Maintenance · Brain{% endblock %}
+{% block body %}
+<h1>Maintenance</h1>
+{% if notice %}<p class="card">{{ notice }}</p>{% endif %}
+{% if failing %}<p class="card"><strong>Automatic maintenance is failing</strong> since {{ failing.since }}: {{ failing.error }}</p>{% endif %}
+<form method="post" action="/maintenance/cleanup"><button>Clean up</button></form>
+<h2>Runs</h2>
+<table><thead><tr><th>Time</th><th>Trigger</th><th>Project</th><th>Checked</th><th>Applied</th><th>Flags</th><th>Status</th><th>Error / note</th></tr></thead><tbody>
+{% for x in runs %}<tr><td>{{ x.started_at }}</td><td>{{ x.trigger }}</td><td>{{ x.project or 'all' }}</td><td>{{ x.checked }}</td><td>{{ x.applied }}</td><td>{{ x.flagged }}</td><td>{{ x.status }}</td><td>{% if x.error %}<span class="run-error">{{ x.error }}</span>{% endif %}{% if x.note %} <span class="muted">{{ x.note }}</span>{% endif %}</td></tr>{% else %}<tr><td colspan="8" class="muted">No maintenance runs.</td></tr>{% endfor %}
+</tbody></table>
+<h2>Changes</h2>
+{% for x in changes %}<article class="card"><h3>#{{ x.memory_id }}{% if x.target_id %} → #{{ x.target_id }}{% endif %} · {{ x.action }}{% if x.run_status == 'dry_run' %} <small>(dry run)</small>{% elif x.reverted_at %} <small>({{ 'reverted' if x.applied else 'dismissed' }})</small>{% endif %}</h3>
+<p>{{ x.summary }}{% if x.blocked_by and x.blocked_by != 'dry_run' %} <span class="muted">Blocked: {{ x.blocked_by }}</span>{% endif %}</p>
+{% if x.blocked_by == 'protected' %}<p class="muted">Your rule may be outdated: review it and edit it yourself on the <a href="/memory">Memory page</a>.</p>{% endif %}
+{% if x.old_title or x.new_title %}<pre>− {{ x.old_title or '' }}
++ {{ x.new_title or '' }}</pre>{% endif %}
+{% if x.old_content or x.new_content %}<pre>− {{ x.old_content or '' }}
++ {{ x.new_content or '' }}</pre>{% endif %}
+{% if x.old_review_after or x.new_review_after %}<p class="muted">review_after: {{ x.old_review_after or '—' }} → {{ x.new_review_after or 'unchanged' }}</p>{% endif %}
+<ul>{% for e in x.evidence_items %}<li>{{ e.ref }}: {{ e.detail or e.result }}{% if e.commit %} ({{ e.commit }}){% endif %}{% if e.source == 'model' %} <span class="muted">(model)</span>{% endif %}</li>{% endfor %}</ul>
+{% if x.applied and not x.reverted_at %}<form method="post" action="/maintenance/{{ x.id }}/revert"><button>Revert</button></form>
+{% elif x.open_flag %}<form method="post" action="/maintenance/{{ x.id }}/dismiss"><button>Dismiss</button></form>{% endif %}</article>{% else %}<p class="muted">No changes.</p>{% endfor %}
+{% endblock %}

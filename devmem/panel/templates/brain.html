@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}Brain{% endblock %}
 {% block head %}
-  <link rel="stylesheet" href="/static/brain.css">
+  <link rel="stylesheet" href="{{ asset('brain.css') }}">
 {% endblock %}
 {% block body_class %}wall-page{% endblock %}
 {% block topbar_extra %}
@@ -49,27 +49,9 @@
         <span><i style="--c:var(--orange)"></i>todo</span>
       </div>
     </div>
-    <div class="panel panel-tokens">
-      <div class="tok-block">
-        <h3>Today</h3>
-        <div class="tok-big" id="tok-today">0</div>
-        <div class="tok-split" id="tok-today-split"></div>
-      </div>
-      <div class="tok-block">
-        <h3>7 days</h3>
-        <div class="tok-big" id="tok-week">0</div>
-        <div class="tok-split" id="tok-week-split"></div>
-      </div>
-      <div class="tok-block tok-spark">
-        <h3>Last 24 h <span class="hint">tokens / hour</span></h3>
-        <svg id="spark" preserveAspectRatio="none"></svg>
-      </div>
-      <div class="tok-block tok-models">
-        <h3>Models today
-          <span class="hint seg-legend"><i class="s-in"></i>in <i class="s-out"></i>out <i class="s-cr"></i>cache r <i class="s-cw"></i>cache w</span>
-        </h3>
-        <ul id="models"></ul>
-      </div>
+    <div class="panel panel-messages">
+      <h3><a href="/messages" title="Open the chats">Messages</a> <span class="hint" id="msg-unread"></span></h3>
+      <ul class="msgs" id="msgs"></ul>
     </div>
   </section>
 
@@ -88,12 +70,12 @@
 {% block scripts %}
   <!-- Two CDN loads: 3d-force-graph 1.73.3 and three 0.162.0 bloom; bloom failure only disables glow. -->
   <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.3/dist/3d-force-graph.min.js" crossorigin="anonymous"></script>
-  <script src="/static/brain3d.js"></script>
+  <script src="{{ asset('brain3d.js') }}"></script>
   <script type="module">
     // Dynamic import so a load failure can be caught and signalled to brain3d.js.
     import("https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/postprocessing/UnrealBloomPass.js/+esm")
       .then(function (m) { window.__devmemBloom = m.UnrealBloomPass; window.dispatchEvent(new Event("devmem-bloom")); })
       .catch(function (e) { window.__devmemBloomError = "bloom module failed to load: " + ((e && e.message) || e); window.dispatchEvent(new Event("devmem-bloom-failed")); });
   </script>
-  <script src="/static/brain.js"></script>
+  <script src="{{ asset('brain.js') }}"></script>
 {% endblock %}

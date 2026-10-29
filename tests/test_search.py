@@ -152,7 +152,7 @@ def test_v2_database_migrates_to_memory_embeddings(tmp_path):
     conn.close()
 
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12
     assert migrated.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_embeddings'").fetchone()
     assert migrated.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memories_embeddings_ad'").fetchone()
 
@@ -171,7 +171,7 @@ def test_v2_to_v3_migration_preserves_memories_fts_and_is_idempotent(tmp_path):
     migrated = connect(path)
     assert migrated.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
     assert migrated.execute("SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'needle'").fetchone()[0] == memory_id
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12
     migrated.close()
     again = connect(path)
     assert again.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
