@@ -564,6 +564,9 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
 
 def maintenance_failing_since(conn: sqlite3.Connection) -> dict | None:
     """{since, error} while the newest maintenance runs failed (or one is stuck running for 6 h+); None when healthy."""
+    from .maintenance import config
+    if not config()["enabled"]:
+        return None
     try:
         rows = conn.execute("SELECT status,started_at,error FROM maintenance_runs WHERE status IN ('success','error','running') ORDER BY id DESC LIMIT 100").fetchall()
     except sqlite3.OperationalError:  # read-only connection to a pre-v7 database
@@ -718,11 +721,15 @@ def similar_memories(conn: sqlite3.Connection, memory_id: int, project: str | No
     return sorted(similar, key=lambda item: (-item["score"], item["id"]))[:3]
 
 
+def not_superseded_sql(alias: str = "m") -> str:
+    return f"NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id={alias}.id AND sl.type='supersedes' AND sl.note='automatic maintenance')"
+
+
 def _bm25_candidates(conn: sqlite3.Connection, query: str, where_sql: str, params: tuple, kind: str | None) -> list[dict]:
     match = fts_query(query)
     if not match:
         return []
-    clauses, values = [f"({where_sql})", "memories_fts MATCH ?", "NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=m.id AND sl.type='supersedes')"], list(params) + [match]
+    clauses, values = [f"({where_sql})", "memories_fts MATCH ?", not_superseded_sql()], list(params) + [match]
     if kind:
         clauses.append("m.kind=?")
         values.append(kind)
@@ -758,7 +765,7 @@ def hybrid_search(conn: sqlite3.Connection, query: str, *, where_sql: str, param
     if normalised_query is None:
         return keyword[:limit]
 
-    clauses, values = [f"({where_sql})", "e.model=?", "e.dim=?", "NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=m.id AND sl.type='supersedes')"], list(params) + [EMBEDDING_MODEL, EMBEDDING_DIM]
+    clauses, values = [f"({where_sql})", "e.model=?", "e.dim=?", not_superseded_sql()], list(params) + [EMBEDDING_MODEL, EMBEDDING_DIM]
     if kind:
         clauses.append("m.kind=?")
         values.append(kind)
@@ -818,7 +825,7 @@ def project_for_cwd(cwd: str | None) -> str | None:
 def context_text(conn: sqlite3.Connection, project: str | None) -> str:
     """Render the compact project and global-memory briefing."""
     current_date = today_utc()
-    visible = "NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=memories.id AND sl.type='supersedes')"
+    visible = not_superseded_sql("memories")
     pinned_rows = conn.execute(f"SELECT id,kind,title,content,project FROM memories WHERE pinned=1 AND ({visible}) AND (review_after IS NULL OR review_after>=?) ORDER BY updated_at DESC", (current_date,)).fetchall()
     pinned_text, cap, last_id = "", 6000 - len("## Pinned\n"), None
     for row in pinned_rows:
@@ -871,8 +878,8 @@ def audit_memories(conn: sqlite3.Connection) -> list[dict]:
     """Return report-only context-rot findings, sorted by category then largest memory."""
     cap, today = max_content(), today_utc()
     terms = _outdated_terms()
-    rows = [dict(row) for row in conn.execute("""SELECT id,title,content,project,updated_at,review_after FROM memories
-        WHERE NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=memories.id AND sl.type='supersedes')""").fetchall()]
+    rows = [dict(row) for row in conn.execute(f"""SELECT id,title,content,project,updated_at,review_after FROM memories
+        WHERE {not_superseded_sql('memories')}""").fetchall()]
     findings = []
     for row in rows:
         base = {key: row[key] for key in ("id", "title", "updated_at")}
@@ -889,9 +896,9 @@ def audit_memories(conn: sqlite3.Connection) -> list[dict]:
         if matched:
             findings.append({**base, "reason": "outdated wording: " + ", ".join(matched)})
 
-    embedded = conn.execute("""SELECT m.id,m.title,m.content,m.project,m.updated_at,e.vec
+    embedded = conn.execute(f"""SELECT m.id,m.title,m.content,m.project,m.updated_at,e.vec
         FROM memories m JOIN memory_embeddings e ON e.memory_id=m.id WHERE e.model=? AND e.dim=?
-        AND NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=m.id AND sl.type='supersedes') ORDER BY m.id""",
+        AND {not_superseded_sql()} ORDER BY m.id""",
                             (EMBEDDING_MODEL, EMBEDDING_DIM)).fetchall()
     for index, left in enumerate(embedded):
         left_vector = np.frombuffer(left["vec"], dtype="<f4")

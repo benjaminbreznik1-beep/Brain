@@ -91,18 +91,32 @@ def test_quota_failure_hands_off_once_and_posts_final_answer(tmp_path):
     assert answer["reply_to"] == job["message_id"] and answer["sender_kind"] == "codex"
 
 
-def test_two_timeouts_end_the_request_instead_of_looping(tmp_path):
+def test_active_runner_failure_does_not_repeat_work(tmp_path):
     job, calls = _job(tmp_path), []
 
     def runner(agent, *args):
         calls.append(agent)
-        return "", "no_response"
+        return "", "idle_timeout"
 
     dispatch.execute(job, dispatch.config(), threading.Event(), runner=runner)
     with db.connection() as conn:
         result = conn.execute("SELECT state,attempts,error FROM message_jobs").fetchone()
-    assert calls == ["claude", "codex"]
-    assert tuple(result) == ("failed", 2, "no_response")
+    assert calls == ["claude"]
+    assert tuple(result) == ("failed", 1, "idle_timeout")
+
+
+def test_final_report_post_failure_leaves_a_fallback_notice(tmp_path, monkeypatch):
+    job = _job(tmp_path)
+    real_post = messages.post
+    def fail_report(conn, body, **kwargs):
+        if body == "Completed work.": raise ValueError("derived subject failed")
+        return real_post(conn, body, **kwargs)
+    monkeypatch.setattr(dispatch.messages, "post", fail_report)
+    dispatch.execute(job, dispatch.config(), threading.Event(), runner=lambda *args: ("Completed work.", ""))
+    with db.connection() as conn:
+        result = conn.execute("SELECT state FROM message_jobs WHERE id=?", (job["id"],)).fetchone()[0]
+        fallback = conn.execute("SELECT body FROM messages WHERE reply_to=? ORDER BY id DESC LIMIT 1", (job["message_id"],)).fetchone()[0]
+    assert result == "completed" and fallback.startswith("The runner completed")
 
 
 def test_existing_reply_prevents_a_duplicate_run(tmp_path):

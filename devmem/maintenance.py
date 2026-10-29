@@ -21,7 +21,7 @@ MODEL_ACTIONS = ACTIONS | {"none"}  # "none" is never stored as an action: it be
 TRIGGERS = {"startup", "session_end", "manual"}
 # The user's own rules: flag-only whatever maintain.json says (config may add kinds, never remove these).
 ALWAYS_PROTECTED = {"preference", "decision"}
-DEFAULTS = {"enabled": True, "engine": "codex", "model": None, "full_every_hours": 20,
+DEFAULTS = {"enabled": False, "engine": "codex", "model": None, "full_every_hours": 20,
             "max_changes": 15, "max_shrink": .5, "use_transcripts": True,
             "protected_kinds": ["preference", "decision"]}
 CHILD_ENV = "DEVMEM_MAINTAIN_CHILD"  # set for engine subprocesses so their own hooks never start maintenance
@@ -108,6 +108,7 @@ class Engine:
 
     def _run(self, prompt: str, payload: dict, schema: dict) -> dict:
         cwd, env = _engine_cwd(payload), {**os.environ, CHILD_ENV: "1"}
+        prompt = "<devmem-spawned>\n" + prompt
         with tempfile.TemporaryDirectory(prefix="devmem-maintain-") as directory:
             schema_path, output_path = Path(directory) / "schema.json", Path(directory) / "output.json"
             schema_path.write_text(json.dumps(schema), encoding="utf-8")
@@ -120,20 +121,20 @@ class Engine:
             else: raise EngineUnavailable("engine must be codex or claude")
             try: result = subprocess.run(command, input=prompt, cwd=cwd, env=env, text=True, capture_output=True, timeout=ENGINE_TIMEOUT)
             except FileNotFoundError: raise EngineUnavailable(f"{self.name} binary not found on PATH") from None
-            except subprocess.TimeoutExpired: raise RuntimeError(f"{self.name} timed out after {ENGINE_TIMEOUT} s") from None
-            if result.returncode: raise RuntimeError(f"{self.name} exited with code {result.returncode}: {_tail(result.stderr) or 'no stderr'}")
+            except subprocess.TimeoutExpired: raise EngineRunFailed(f"{self.name} timed out after {ENGINE_TIMEOUT} s") from None
+            if result.returncode: raise EngineRunFailed(f"{self.name} exited with code {result.returncode}: {_tail(result.stderr) or 'no stderr'}")
             if self.name == "codex":
-                if not output_path.is_file(): raise RuntimeError("codex wrote no output file")
+                if not output_path.is_file(): raise EngineRunFailed("codex wrote no output file")
                 raw = output_path.read_text(encoding="utf-8")
             else:
                 try: outer = json.loads(result.stdout)
-                except ValueError: raise RuntimeError("claude returned non-JSON output") from None
+                except ValueError: raise EngineOutputError("claude returned non-JSON output") from None
                 if not isinstance(outer, dict) or outer.get("is_error") or not isinstance(outer.get("result"), str):
-                    raise RuntimeError("claude reported an error: " + _tail(str(outer.get("result") if isinstance(outer, dict) else outer), 200))
+                    raise EngineRunFailed("claude reported an error: " + _tail(str(outer.get("result") if isinstance(outer, dict) else outer), 200))
                 raw = _strip_fences(outer["result"])
         try: parsed = json.loads(raw)
-        except ValueError: raise RuntimeError(f"{self.name} returned invalid JSON") from None
-        if not isinstance(parsed, dict): raise RuntimeError(f"{self.name} returned a non-object JSON result")
+        except ValueError: raise EngineOutputError(f"{self.name} returned invalid JSON") from None
+        if not isinstance(parsed, dict): raise EngineOutputError(f"{self.name} returned a non-object JSON result")
         return parsed
 
     def proposal(self, payload: dict) -> dict:
@@ -178,11 +179,12 @@ def _hidden_sql(alias="m"): return f"NOT EXISTS(SELECT 1 FROM memory_links sl WH
 
 
 def due_for_startup() -> bool:
-    """Only an unlimited, project-less, non-dry-run successful run resets the full-run window."""
+    """Only an unlimited, project-less, non-dry-run successful run resets the full-run window; so does a missing engine, which retrying sooner cannot fix."""
     cfg = config()
     if not cfg["enabled"] and not cfg.get("error"): return False
     with connection() as conn:
-        row = conn.execute("SELECT finished_at FROM maintenance_runs WHERE full=1 AND status='success' ORDER BY id DESC LIMIT 1").fetchone()
+        row = conn.execute("""SELECT finished_at FROM maintenance_runs WHERE full=1 AND finished_at IS NOT NULL
+            AND (status='success' OR (status='error' AND error LIKE 'engine unavailable:%')) ORDER BY id DESC LIMIT 1""").fetchone()
     finished = parse_ts(row["finished_at"]) if row else None
     return not finished or datetime.now(UTC) - finished > timedelta(hours=float(cfg["full_every_hours"]))
 
@@ -476,16 +478,23 @@ class _MemoryFailed(Exception):
     def __init__(self, memory_id: int, message: str): super().__init__(message); self.memory_id = memory_id
 
 
+class EngineRunFailed(RuntimeError):
+    """The engine process failed, so the run rather than one memory failed."""
+
+
+class EngineOutputError(RuntimeError):
+    """One engine response could not be used for this memory."""
+
+
 def _error_text(exc: BaseException) -> str:
     if isinstance(exc, (KeyboardInterrupt, SystemExit)): return f"interrupted ({type(exc).__name__})"
-    if isinstance(exc, (_MemoryFailed, EngineUnavailable)) or type(exc) is RuntimeError: return _tail(str(exc), 500)  # already sanitized by Engine
+    if isinstance(exc, (_MemoryFailed, EngineUnavailable, EngineRunFailed, EngineOutputError)) or type(exc) is RuntimeError: return _tail(str(exc), 500)  # already sanitized by Engine
     return _tail(f"{type(exc).__name__}: {exc}", 500)
 
 
 def _call_engine(memory_id: int, fn, payload: dict) -> dict:
     try: result = fn(payload)
-    except EngineUnavailable: raise
-    except Exception as exc: raise _MemoryFailed(memory_id, f"memory #{memory_id}: {_error_text(exc)}") from None
+    except EngineOutputError as exc: raise _MemoryFailed(memory_id, f"memory #{memory_id}: {_error_text(exc)}") from None
     if not isinstance(result, dict): raise _MemoryFailed(memory_id, f"memory #{memory_id}: engine returned a non-object result")
     return result
 
@@ -619,6 +628,7 @@ def _run_locked(trigger, project, dry_run, limit, engine, transcript_path, cfg) 
         return _apply_all(run_id, decisions, dry_run, cfg, stats["checked"], note)
     except BaseException as exc:
         message = _error_text(exc)
+        if isinstance(exc, EngineUnavailable): message = "engine unavailable: " + message
         with connection() as conn:
             conn.execute("UPDATE maintenance_runs SET finished_at=?,status='error',checked=?,applied=0,flagged=0,error=? WHERE id=?", (now(), stats["checked"], message, run_id))
             if isinstance(exc, _MemoryFailed) and not dry_run:  # remembered so the next run skips it instead of failing again
@@ -691,17 +701,19 @@ def _cleanup_reason(conn, flag: dict) -> str | None:
     if flag["blocked_by"] in {"protected", "secret", "engine_error"}: return None
     try: stored = json.loads(flag["evidence"] or "[]")
     except ValueError: stored = []
-    refs = {(item.get("ref"), item.get("check")) for item in stored if isinstance(item, dict)
-            and item.get("check") in {"path", "branch", "commit", "relative-date", "age"} and item.get("ref")}
-    current, _ = _evidence(memory)
+    refs = {(item.get("ref"), item.get("check")) for item in stored if isinstance(item, dict)}
+    if not refs or any(not ref or check not in {"path", "branch", "commit", "age"} for ref, check in refs): return None
+    current, info = _evidence(memory)
     failing = {(item.get("ref"), item.get("check")) for item in current}
-    if not refs & failing: return "evidence no longer holds"
+    unverifiable = {(item.get("ref"), item.get("check")) for item in info}
+    if not any(item.get("check") == "error" for item in info) and not refs & failing and not refs & unverifiable: return "evidence no longer holds"
     return None
 
 
 def cleanup(dry_run: bool = False) -> dict:
     """Close resolved flags and discard old maintenance bookkeeping without running an engine."""
     try:
+        _SUFFIX_CACHE.clear()
         with Lock(lock_path()) as lock:
             if not lock.acquired: return {"status": "locked"}
             with connection() as conn:

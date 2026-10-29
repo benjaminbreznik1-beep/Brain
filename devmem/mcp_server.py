@@ -19,7 +19,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from . import messages
 
 log = logging.getLogger("devmem.mcp")
-from .db import connection, context_text, embed_memory, hybrid_search, is_stale, now, project_for_cwd, restore_memory, similar_memories, validate_content, validate_review_after
+from .db import connection, context_text, embed_memory, hybrid_search, is_stale, not_superseded_sql, now, project_for_cwd, restore_memory, similar_memories, validate_content, validate_review_after
 
 mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Link related memories instead of repeating their content. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
@@ -261,7 +261,7 @@ def _get(id: int):
 _LINK_TYPES = ("blocks", "depends_on", "relates_to", "overlaps", "fixes", "supersedes")
 
 
-@mcp.tool(description="Link two memories with a typed relation (blocks, depends_on, relates_to, overlaps, fixes, supersedes) so related facts are found together; use instead of repeating the other memory's content.")
+@mcp.tool(description="Link two memories with a typed relation (blocks, depends_on, relates_to, overlaps, fixes, supersedes) so related facts are found together; for supersedes, from_id is the newer memory and supersedes to_id. Use instead of repeating the other memory's content.")
 def memory_link(from_id: int, to_id: int, type: str, note: str = "", ctx: Context | None = None) -> dict:
     def work():
         if from_id == to_id: raise ValueError("cannot link a memory to itself")
@@ -333,7 +333,7 @@ def memory_list(limit: int = 20, kind: str | None = None, scope: str = "project"
         if kind: where += " AND kind=?"; params += (kind,)
         with connection() as conn:
             return [{**dict(r), "stale": is_stale(r["review_after"])} for r in conn.execute(f"""SELECT id,title,kind,project,tags,pinned,review_after,updated_at FROM memories
-                WHERE {where} AND NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id=memories.id AND sl.type='supersedes') ORDER BY updated_at DESC LIMIT ?""", (*params, max(1,min(limit,100)))).fetchall()]
+                WHERE {where} AND {not_superseded_sql('memories')} ORDER BY updated_at DESC LIMIT ?""", (*params, max(1,min(limit,100)))).fetchall()]
     return _call("memory_list", {"limit":limit,"kind":kind,"scope":scope}, work, ctx)
 
 
@@ -447,7 +447,9 @@ async def message_wait(thread_id: int, timeout_s: int = 60, after_id: int | None
                 if not conn.execute("SELECT 1 FROM messages WHERE thread_id=?", (thread_id,)).fetchone(): raise ValueError(f"thread {thread_id} does not exist")
                 # fix(2026-10-28): the baseline used to be the newest id at call time, so a reply that landed before the wait was never returned.
                 return messages.wait_baseline(conn, thread_id, _me(reader))
-            return messages.newer(conn, thread_id, after)
+            rows = messages.newer(conn, thread_id, after)
+            if rows: messages.mark_read(conn, [row["id"] for row in rows], _me(reader))
+            return rows
 
     try:
         _client(ctx)

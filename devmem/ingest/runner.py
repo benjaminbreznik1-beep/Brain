@@ -176,12 +176,12 @@ def ingest_file(conn, path: Path, parser: str, known: dict[str, int] | None = No
     store = store or LimitStore(conn)
     count, end, seen = 0, start, set()
     context: dict = {}
-    if parser == "codex" and start:
+    if start:
         try:
             context = json.loads(row[1]) if row and row[1] else {}
         except ValueError:
             context = {}
-        if not context:  # offsets written by v1 carry no parser state: rebuild it once from the prefix
+        if parser == "codex" and not context:  # offsets written by v1 carry no parser state: rebuild it once from the prefix
             with path.open("rb") as old:
                 for raw in old:
                     if old.tell() > start:
@@ -192,17 +192,41 @@ def ingest_file(conn, path: Path, parser: str, known: dict[str, int] | None = No
             break
         end = next_at
         try:
+            if "prompt_checked" not in context: _check_spawned(parser, line, context)
             count += _ingest_line(conn, parser, line, source, at, seen, context, store, stats)
         except Exception as exc:
             raise _LineFailed(at) from exc
     conn.execute("INSERT INTO ingest_offsets(source_file,byte_offset,context) VALUES (?,?,?) "
                  "ON CONFLICT(source_file) DO UPDATE SET byte_offset=excluded.byte_offset, context=excluded.context",
-                 (source, end, json.dumps(context) if parser == "codex" and context else None))
+                 (source, end, json.dumps(context) if context else None))
     if parser == "codex" and isinstance(context.get("session_id"), str):
         conn.execute("UPDATE subagents SET tail_partial=? WHERE agent_id=?", (int(end < size), context["session_id"]))
     if known is not None:
         known[source] = end
     return count
+
+
+SPAWNED = "<devmem-spawned>"  # dispatch and maintenance start their runner prompts with this
+
+
+def _check_spawned(parser: str, line: str, context: dict) -> None:
+    """Only the session's first user prompt can mark it devmem-spawned; a later mention of the marker (a diff, a quoted log) never does."""
+    if '"user"' not in line: return
+    try: obj = json.loads(line)
+    except ValueError: return
+    if not isinstance(obj, dict): return
+    if parser == "codex":
+        payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+        if obj.get("type") != "response_item" or payload.get("type") != "message" or payload.get("role") != "user": return
+        text = codex._text(payload.get("content"))
+        if not isinstance(text, str) or not codex._is_task(text): return  # environment and instruction preambles come first
+    else:
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        if obj.get("type") != "user" or obj.get("isMeta") or message.get("role") != "user": return
+        text = codex._text(message.get("content"))
+        if not isinstance(text, str) or not text.strip(): return
+    context["prompt_checked"] = True
+    if text.lstrip().startswith(SPAWNED): context["devmem_spawned"] = True
 
 
 def _ingest_line(conn, parser: str, line: str, source: str, at: int, seen: set, context: dict, store: LimitStore, stats: dict[str, int] | None) -> int:

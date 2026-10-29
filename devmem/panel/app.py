@@ -60,8 +60,13 @@ def _ingest_loop(stop: threading.Event):
     pruned_at = 0.0
     while True:
         if time.monotonic() - pruned_at > PRUNE_EVERY_S:  # message retention works even when maintenance is disabled
-            from ..maintenance import prune_messages
-            prune_messages(); pruned_at = time.monotonic()
+            try:
+                from ..maintenance import prune_messages
+                prune_messages()
+            except Exception:
+                log.exception("message pruning failed")
+            finally:
+                pruned_at = time.monotonic()
         try:
             ingest_all()
         except Exception as exc:  # dashboard remains usable if one log is malformed/unreadable

@@ -110,10 +110,13 @@ def apply_codex(conn, rec: dict[str, Any], source_file: str, offset: int) -> Non
     handoff = _HANDOFF.search(task or "")
     conn.execute("""UPDATE subagents SET agent_kind='codex',agent_type='codex',project=COALESCE(project,?),model=COALESCE(model,?),
         started_at=COALESCE(started_at,?),last_activity_at=CASE WHEN ? IS NOT NULL AND (last_activity_at IS NULL OR datetime(?) > datetime(last_activity_at)) THEN ? ELSE last_activity_at END,
-        task=COALESCE(task,?),handoff_id=COALESCE(handoff_id,?),last_text=COALESCE(?,last_text),finished=MAX(finished,?),last_terminal=? WHERE agent_id=?""",
+        task=COALESCE(task,?),handoff_id=COALESCE(handoff_id,?),last_text=COALESCE(?,last_text),finished=CASE WHEN ? THEN 0 ELSE MAX(finished,?) END,last_terminal=? WHERE agent_id=?""",
                  (project_for_cwd(rec.get("project")) if rec.get("project") else None, rec.get("model"), ts, ts, ts, ts,
                   clean(task, TASK_MAX) if task else None, handoff.group(0) if handoff else None,
-                  clean(rec.get("report_text"), BODY_MAX) if rec.get("report_text") else None, int(rec.get("finished", False)), int(rec.get("terminal", False)), aid))
+                  clean(rec.get("report_text"), BODY_MAX) if rec.get("report_text") else None, int(bool(task)), int(rec.get("finished", False)), int(rec.get("terminal", False)), aid))
+    if task:
+        conn.execute("UPDATE subagents SET report_msg_id=NULL,ended=NULL WHERE agent_id=?", (aid,))
+        conn.execute("UPDATE messages SET status='open',closed_at=NULL WHERE thread_id=(SELECT thread_id FROM messages WHERE id=(SELECT spawn_msg_id FROM subagents WHERE agent_id=?))", (aid,))
     if rec.get("text"):
         conn.execute("INSERT OR IGNORE INTO subagent_texts(agent_id,ts,role,body,source_offset) VALUES(?,?,?,?,?)",
                      (aid, ts, "agent", rec["text"], offset))
@@ -202,7 +205,9 @@ def _end(row, at: datetime) -> tuple[str, str] | None:
     last = parse_ts(row["last_activity_at"] or row["started_at"])
     idle = (at - last).total_seconds() if last else float("inf")
     if row["finished"] or row["last_terminal"]:
-        if row["tail_partial"]: return None  # the final line is still being written; an earlier text is not the report
+        if row["tail_partial"] and idle < STOP_S: return None  # the final line is still being written; an earlier text is not the report
+        if row["tail_partial"]:
+            return "stopped", clean("(no report: agent stopped; its last text follows)\n\n" + row["last_text"], BODY_MAX) if row["last_text"] else "(no report: agent stopped)"
         if not row["last_terminal"] and idle < REPORT_WAIT_S: return None  # meta can land before the last record
         return "finished", row["last_text"] or "(finished without a text report)"
     if idle < STOP_S: return None

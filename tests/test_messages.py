@@ -335,6 +335,8 @@ def test_wait_without_after_id_returns_a_reply_that_landed_earlier():
     assert again["timed_out"] and again["last_id"] > result["last_id"]  # starts after the worker's own newest message
     observer = asyncio.run(mcp_server.message_wait(question["thread_id"], timeout_s=0, reader="someone-else"))
     assert [m["body"] for m in observer["messages"]] == ["sqlite", "thanks, and the port?"]  # not in the thread: after its root
+    with connection() as conn:
+        assert conn.execute("SELECT 1 FROM message_reads WHERE message_id=? AND reader='worker'", (result["messages"][0]["id"],)).fetchone()
 
 
 def test_tool_call_logging_failure_never_masks_the_result_or_the_error(monkeypatch, caplog):
@@ -768,6 +770,53 @@ def test_interactive_codex_chat_and_silent_stop_after_cutoff():
         agent = messages.subagent(conn, session)
         assert agent["status"] == "stopped" and messages.chat(conn, "d:" + session)["title"].startswith("Codex · demo")
         assert any(item["icon"] == "■" for item in messages.chat(conn, "d:" + session)["headlines"])
+
+
+def test_devmem_spawned_rollout_is_not_an_agent_timeline():
+    session = "devmem-child"
+    _rollout(Path(os.environ["DEVMEM_CODEX_HOME"]), session, [
+        _rollout_record("session_meta", {"id": session, "cwd": "/work/demo"}, 1),
+        _rollout_record("response_item", {"type": "message", "role": "user", "content": [{"text": "<devmem-spawned>\nDo local work."}]}, 1),
+        _rollout_record("response_item", {"type": "message", "role": "assistant", "content": [{"text": "Done."}]}, 1),
+        _rollout_record("event_msg", {"type": "task_complete"}, 1),
+    ])
+    ingest_all()
+    with connection() as conn:
+        assert conn.execute("SELECT 1 FROM subagents WHERE agent_id=?", (session,)).fetchone() is None
+
+
+def test_marker_quoted_later_in_a_rollout_keeps_the_agent_timeline():
+    session = "quotes-marker"
+    _rollout(Path(os.environ["DEVMEM_CODEX_HOME"]), session, [
+        _rollout_record("session_meta", {"id": session, "cwd": "/work/demo"}, 1),
+        _rollout_record("response_item", {"type": "message", "role": "user", "content": [{"text": "Review the ingest diff."}]}, 1),
+        _rollout_record("response_item", {"type": "message", "role": "user", "content": [{"text": "The diff adds <devmem-spawned>\nto prompts."}]}, 2),
+        _rollout_record("response_item", {"type": "message", "role": "assistant", "content": [{"text": "Looks fine."}]}, 3),
+        _rollout_record("event_msg", {"type": "task_complete"}, 3),
+    ])
+    ingest_all()
+    with connection() as conn:
+        row = conn.execute("SELECT finished,last_text FROM subagents WHERE agent_id=?", (session,)).fetchone()
+        context = conn.execute("SELECT context FROM ingest_offsets WHERE source_file LIKE ?", (f"%{session}%",)).fetchone()[0]
+    assert row["finished"] == 1 and row["last_text"] == "Looks fine." and "devmem_spawned" not in context
+
+
+def test_derived_subject_is_redacted_instead_of_rejected():
+    with connection() as conn:
+        message_id = messages.post(conn, "Fixed the `token`: `refresh_token_handler` path.", sender="worker", sender_kind="claude")
+        subject = conn.execute("SELECT subject FROM messages WHERE id=?", (message_id,)).fetchone()[0]
+    assert "[redacted]" in subject
+
+
+def test_spawned_claude_session_does_not_make_chat_attachment_ambiguous():
+    with connection() as conn:
+        root = messages.post(conn, "Question for the current agent.", sender="worker", sender_kind="claude", project="/work/demo")
+        created = conn.execute("SELECT * FROM messages WHERE id=?", (root,)).fetchone()
+        for session, source in (("normal", "normal.jsonl"), ("spawned", "spawned.jsonl")):
+            conn.execute("""INSERT INTO usage_events(agent,session_id,project,model,ts,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,source_file,source_offset)
+                VALUES('claude',?,'/work/demo','claude',?,0,0,0,0,0,?,0)""", (session, created["created_at"], source))
+        conn.execute("INSERT INTO ingest_offsets(source_file,byte_offset,context) VALUES('spawned.jsonl',1,'{\"devmem_spawned\": true}')")
+        assert messages.chat_keys(conn, [dict(created)])[root] == "s:normal"
 
 
 def test_v10_database_migrates_to_v11_with_codex_columns(tmp_path, monkeypatch):

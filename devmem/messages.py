@@ -118,8 +118,9 @@ def post(conn, body: str, *, sender: str, sender_kind: str, to: str = "*", subje
     if subject is not None and len(subject) > SUBJECT_MAX: raise ValueError(f"subject exceeds {SUBJECT_MAX} characters")
     sender, to = _name(sender, "sender"), _name(to, "to")
     speaker = friendly_name(sender) if declared and sender_kind != "codex" else {"user": "You", "claude": "Claude", "codex": "Codex"}.get(sender_kind, friendly_name(sender))
-    if subject is None: subject = _cut(f"{speaker}: {_sentence(body, 72)}", SUBJECT_MAX)
-    guard(body, subject)  # before anything is written: a rejected secret must never reach the DB
+    derived_subject = subject is None
+    if derived_subject: subject = SECRET.sub("[redacted]", _cut(f"{speaker}: {_sentence(body, 72)}", SUBJECT_MAX))
+    guard(body, None if derived_subject else subject)  # before anything is written: a rejected secret must never reach the DB
     if conn.execute("SELECT COUNT(*) FROM messages WHERE sender=? AND agent_id IS NULL AND datetime(created_at) >= datetime('now','-60 seconds')",
                     (sender,)).fetchone()[0] >= RATE_PER_MIN:
         raise ValueError(f"rate limit: at most {RATE_PER_MIN} posts per minute per sender")
@@ -383,7 +384,8 @@ def chat_keys(conn, roots: list[dict[str, Any]]) -> dict[int, str]:
         if not times: continue
         since = (min(times) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
         windows = [(sid, parse_ts(a), parse_ts(b)) for sid, a, b in conn.execute(
-            "SELECT session_id,MIN(ts),MAX(ts) FROM usage_events WHERE agent='claude' AND project=? AND ts >= ? AND session_id IS NOT NULL GROUP BY session_id", (project, since))]
+            """SELECT session_id,MIN(ts),MAX(ts) FROM usage_events WHERE agent='claude' AND project=? AND ts >= ? AND session_id IS NOT NULL
+               AND NOT EXISTS(SELECT 1 FROM ingest_offsets io WHERE io.source_file=usage_events.source_file AND io.context LIKE '%devmem_spawned%') GROUP BY session_id""", (project, since))]
         for r in rows:
             if r.get("sender_kind") == "codex": continue
             at = parse_ts(r["created_at"])

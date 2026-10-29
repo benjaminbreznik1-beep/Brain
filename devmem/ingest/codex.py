@@ -142,6 +142,7 @@ def _is_task(text: str) -> bool:
 
 def parse_agent_record(line: str, context: dict[str, Any]) -> dict[str, Any] | None:
     """One safe, display-only Codex rollout record. parse_record owns shared context and token parsing."""
+    if context.get("devmem_spawned"): return None
     try: obj = json.loads(line)
     except json.JSONDecodeError: return None
     if not isinstance(obj, dict): return None
@@ -159,7 +160,6 @@ def parse_agent_record(line: str, context: dict[str, Any]) -> dict[str, Any] | N
     if role == "assistant" and isinstance(text, str) and text.strip():
         rec["text"] = _clean(text, REMARK_MAX)
         rec["report_text"] = _clean(text, 8000)
-        rec["terminal"] = True  # runner clears this when a later tool call appears
         return rec
     return None
 

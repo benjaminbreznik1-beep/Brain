@@ -29,6 +29,11 @@ def _fresh_mcp_client(monkeypatch):
     monkeypatch.setattr(mcp_server, "_client_id", None); monkeypatch.setattr(mcp_server, "_client_name", None)
 
 
+@pytest.fixture(autouse=True)
+def _maintenance_enabled():
+    _config(enabled=True)
+
+
 class FakeEngine:
     name = "fake"; model = None
     def __init__(self, proposals=None, ok=True):
@@ -64,9 +69,9 @@ def _changes(mid=None):
         return [dict(r) for r in conn.execute("SELECT * FROM maintenance_changes" + (" WHERE memory_id=?" if mid else "") + " ORDER BY id", (mid,) if mid else ())]
 def _runs():
     with connection() as conn: return [dict(r) for r in conn.execute("SELECT * FROM maintenance_runs ORDER BY id")]
-def _link(a, b, kind="overlaps"):
-    with connection() as conn: return conn.execute("INSERT INTO memory_links(from_id,to_id,type,created_at) VALUES(?,?,?,?)", (a, b, kind, now())).lastrowid
-def _config(**values): Path(os.environ["DEVMEM_MAINTAIN"]).write_text(json.dumps(values), encoding="utf-8")
+def _link(a, b, kind="overlaps", note=""):
+    with connection() as conn: return conn.execute("INSERT INTO memory_links(from_id,to_id,type,note,created_at) VALUES(?,?,?,?,?)", (a, b, kind, note, now())).lastrowid
+def _config(**values): Path(os.environ["DEVMEM_MAINTAIN"]).write_text(json.dumps({"enabled": True, **values}), encoding="utf-8")  # maintenance is opt-in; tests opt in unless they pass enabled=False
 def _hash():
     with connection() as conn:
         return hashlib.sha256(json.dumps([[list(r) for r in conn.execute(f"SELECT * FROM {t} ORDER BY id")] for t in ("memories", "memory_links", "memory_revisions")]).encode()).hexdigest()
@@ -219,6 +224,7 @@ def test_bad_config_disables_maintenance_and_records_an_error(text, error, monke
 
 
 def test_config_defaults_and_protected_kinds_can_only_grow():
+    Path(os.environ["DEVMEM_MAINTAIN"]).unlink()
     assert maintenance.config() == maintenance.DEFAULTS
     _config(protected_kinds=["todo"]); assert set(maintenance.config()["protected_kinds"]) == {"todo", "decision", "preference"}
     _config(enabled=False); assert maintenance.run(engine=FakeEngine())["status"] == "disabled" and not maintenance.due_for_startup()
@@ -249,12 +255,32 @@ def test_real_engine_failure_is_an_error_run_without_changes(monkeypatch):
     monkeypatch.setattr(maintenance.subprocess, "run", lambda *a, **k: _completed(1, stderr="boom"))
     result = maintenance.run(engine=maintenance.Engine("codex"))
     assert result["status"] == "error" and "exited with code 1: boom" in _runs()[-1]["error"] and "SENSITIVE" not in _runs()[-1]["error"]
-    assert _row(mid)["content"] == "SENSITIVE-MEMORY-TEXT WIP" and [c["blocked_by"] for c in _changes()] == ["engine_error"]
+    assert _row(mid)["content"] == "SENSITIVE-MEMORY-TEXT WIP" and not _changes()
     def missing(*a, **k): raise FileNotFoundError("codex")
     monkeypatch.setattr(maintenance.subprocess, "run", missing)
     other = _memory("other WIP")
     result = maintenance.run(engine=maintenance.Engine("codex"))
     assert result["status"] == "error" and "binary not found" in result["error"] and not _changes(other)  # not the memory's fault
+
+
+def test_engine_unavailable_waits_for_the_normal_startup_interval_without_flagging():
+    mid = _memory()
+    class MissingEngine:
+        name, model = "codex", None
+        def proposal(self, payload): raise maintenance.EngineUnavailable("codex binary not found on PATH")
+    result = maintenance.run(engine=MissingEngine())
+    assert result["status"] == "error" and not maintenance.due_for_startup() and not _changes(mid)
+    _config(enabled=False)
+    with connection() as conn: assert "Automatic maintenance failing" not in context_text(conn, None)
+
+
+def test_engine_process_failure_keeps_startup_due_and_blames_no_memory():
+    mid = _memory()
+    class FailingEngine:
+        name, model = "codex", None
+        def proposal(self, payload): raise maintenance.EngineRunFailed("codex exited with code 1: quota exceeded")
+    result = maintenance.run(engine=FailingEngine())
+    assert result["status"] == "error" and result["error"].startswith("codex exited") and maintenance.due_for_startup() and not _changes(mid)
 
 
 def test_codex_command_uses_stdin_schema_model_and_child_env(monkeypatch, tmp_path):
@@ -734,7 +760,7 @@ def test_absolute_dir_under_an_existing_root_is_missing(tmp_path):
 
 def test_superseded_memories_are_hidden_everywhere(tmp_path, monkeypatch):
     project = str(tmp_path); old, new = _memory("needle text", project=project, title="needle old"), _memory("needle text newer", project=project, title="needle new")
-    _link(new, old, "supersedes")
+    _link(new, old, "supersedes", "automatic maintenance")
     with connection() as conn:
         assert [r["id"] for r in hybrid_search(conn, "needle", where_sql="1=1")] == [new]
         briefing = context_text(conn, project); assert "needle new" in briefing and "needle old" not in briefing
@@ -752,6 +778,16 @@ def test_superseded_memories_are_hidden_everywhere(tmp_path, monkeypatch):
         finally: set_embedder(None)
     listed = [r["id"] for r in mcp_server.memory_list(scope="all", limit=100)]
     assert new in listed and old not in listed and mcp_server.memory_get(old)["superseded_by"] == new
+
+
+def test_manual_supersedes_link_keeps_the_older_memory_visible(tmp_path):
+    project = str(tmp_path); old, new = _memory("needle text", project=project, title="needle old"), _memory("needle newer", project=project, title="needle new")
+    _link(new, old, "supersedes", "user correction")
+    with connection() as conn:
+        assert {row["id"] for row in hybrid_search(conn, "needle", where_sql="1=1")} == {old, new}
+        assert "needle old" in context_text(conn, project)
+    assert {row["id"] for row in mcp_server.memory_list(scope="all", limit=100)} >= {old, new}
+    assert mcp_server.memory_get(old)["superseded_by"] == new
 
 
 # ---------------------------------------------------------------- schedule, hooks, CLI
@@ -990,6 +1026,33 @@ def test_cleanup_closes_deleted_superseded_edited_and_resolved_flags_but_keeps_g
         closed = {row["id"]: row for row in conn.execute("SELECT id,reverted_at,summary FROM maintenance_changes")}
     for change in (deleted, sup, edit, evidence_change): assert closed[change]["reverted_at"] and "closed:" in closed[change]["summary"]
     assert all(closed[change]["reverted_at"] is None for change in guarded)
+
+
+def test_cleanup_keeps_evidence_it_cannot_recheck_and_refreshes_path_checks(tmp_path, monkeypatch):
+    run = _cleanup_run()
+    audit = _cleanup_change(run, _memory("plain"), evidence=json.dumps([{"ref": "audit", "check": "audit", "result": "old"}]))
+    model = _cleanup_change(run, _memory("plain"), evidence=json.dumps([{"ref": "model", "detail": "uncertain"}]))
+    relative = _cleanup_change(run, _memory("plain"), evidence=json.dumps([{"ref": "yesterday", "check": "relative-date", "result": "words present"}]))
+    repo = _repo(tmp_path / "repo"); (repo / "gone.txt").write_text("x"); _git(repo, "add", "gone.txt"); _git(repo, "commit", "-q", "-m", "add")
+    mid = _memory("see gone.txt", project=str(repo))
+    maintenance._evidence(_row(mid))
+    (repo / "gone.txt").unlink()
+    monkeypatch.setattr(maintenance, "_git", lambda *args: (_ for _ in ()).throw(OSError("git unavailable")))
+    path = _cleanup_change(run, mid, evidence=json.dumps([{"ref": "gone.txt", "check": "path", "result": "missing"}]))
+    maintenance.cleanup()
+    with connection() as conn:
+        open_flags = {row["id"] for row in conn.execute("SELECT id FROM maintenance_changes WHERE reverted_at IS NULL")}
+    assert {audit, model, relative, path} <= open_flags
+
+
+def test_ingest_loop_continues_when_message_pruning_fails(monkeypatch):
+    from devmem.panel import app as panel
+    calls = []
+    monkeypatch.setattr(maintenance, "prune_messages", lambda: (_ for _ in ()).throw(RuntimeError("broken prune")))
+    monkeypatch.setattr(panel, "ingest_all", lambda: calls.append("ingest"))
+    monkeypatch.setattr(panel, "ensure_embeddings", lambda conn: calls.append("embeddings"))
+    panel._ingest_loop(SimpleNamespace(wait=lambda seconds: True))
+    assert calls == ["ingest", "embeddings"]
 
 
 def test_cleanup_prunes_old_dry_run_runs_and_their_changes():
