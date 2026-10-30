@@ -32,6 +32,7 @@
       </select>
       <input name="tags" placeholder="tags">
       <input name="project" placeholder="project path (optional)" size="36">
+      <input name="review_after" type="date" title="Review date for time-bound notes">
     </div>
     <textarea name="content" required></textarea>
     <button>Save</button>
@@ -43,6 +44,7 @@
   <summary>
     <span class="badge kind-{{ x.kind }}">{{ x.kind }}</span>
     {% if x.match %}<span class="badge">{{ x.match }}</span>{% endif %}
+    {% if x.stale %}<span class="badge">stale</span>{% endif %}
     {{ x.title }}
     <span class="muted"> · {{ x.project or 'global' }} · <time data-rel datetime="{{ x.updated_at }}">{{ x.updated_at }}</time></span>
   </summary>
@@ -55,6 +57,7 @@
         {% endfor %}
       </select>
       <input name="tags" value="{{ x.tags }}" placeholder="tags">
+      <input name="review_after" type="date" value="{{ x.review_after or '' }}" title="Review date for time-bound notes">
     </div>
     <textarea name="content">{{ x.content }}</textarea>
     <button>Update</button>

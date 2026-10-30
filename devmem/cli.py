@@ -6,7 +6,7 @@ import os
 import re
 import sys
 
-from .db import context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, project_for_cwd, readonly_connection
+from .db import audit_memories, context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, project_for_cwd, readonly_connection
 from .embed import get_embedder
 
 
@@ -82,6 +82,7 @@ def main() -> None:
     sub.add_parser("mcp")
     sub.add_parser("ingest")
     sub.add_parser("embed")
+    sub.add_parser("audit")
     panel = sub.add_parser("panel"); panel.add_argument("--port", type=int, default=8765)
     search = sub.add_parser("search"); search.add_argument("q"); search.add_argument("--limit", type=int, default=8)
     context = sub.add_parser("context")
@@ -107,6 +108,13 @@ def main() -> None:
                         print(f"devmem embed: {status.get('last_error') or 'embedder unavailable'}", file=sys.stderr)
                         raise SystemExit(1)
                     break
+    elif args.command == "audit":
+        with connection() as conn:
+            rows = audit_memories(conn)
+        if not rows:
+            print("No audit findings.")
+        for row in rows:
+            print(f"#{row['id']}\t{row['title']}\t{row['size']} chars\t{row['updated_at']}\t{row['reason']}")
     elif args.command == "panel":
         import uvicorn
         from .panel.app import _shutdown_event, app

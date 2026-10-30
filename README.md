@@ -43,6 +43,14 @@ Updates and deletes retain a revision history; use `memory_history` to inspect i
 
 Use `memory_link` to connect two memories with `blocks`, `depends_on`, `relates_to`, `overlaps`, `fixes`, or `supersedes`, instead of repeating the related memory's content. Use `memory_unlink` to remove one typed link or all link types between two memories.
 
+Memory content is capped at 2,000 characters by default (`DEVMEM_MAX_CONTENT` overrides it). Put lengthy material in a file and save a concise summary with its path. For status, handoff, and in-progress memories, set `review_after` to an ISO date (often about 14 days ahead); after that date they are marked stale and omitted from the session briefing. Run `devmem audit` for a read-only report of oversized, expired, likely duplicate, old, and outdated-wording memories. Optional outdated terms live in `~/.devmem/audit.json` (or `DEVMEM_AUDIT`), for example:
+
+```json
+{"outdated_terms": ["legacy-label", "old-role"]}
+```
+
+Before any future schema upgrade of an existing database, devmem creates a consistent SQLite snapshot in `~/.devmem/backups/` (override with `DEVMEM_BACKUP_DIR`).
+
 ## Reminders
 
 To receive lightweight reminders after relevant shell commands, add this to Claude Code's `settings.json` by hand:

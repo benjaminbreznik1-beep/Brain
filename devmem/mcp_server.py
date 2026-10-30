@@ -14,7 +14,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 from mcp.server.fastmcp import Context, FastMCP
 
-from .db import connection, context_text, embed_memory, hybrid_search, now, project_for_cwd, similar_memories
+from .db import connection, context_text, embed_memory, hybrid_search, is_stale, now, project_for_cwd, similar_memories, validate_content, validate_review_after
 
 mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Link related memories instead of repeating their content. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
@@ -195,15 +195,17 @@ def _scope(scope: str, project: str | None) -> tuple[str, tuple]:
     raise ValueError("scope must be project, global, or all")
 
 
-@mcp.tool(description="Save a durable coding memory and return its id plus optional same-scope duplicate hints; merge a same-fact hint into the old memory. Never save secrets.")
-def memory_save(content: str, title: str | None = None, kind: str = "note", tags: str | None = None, scope: str = "project", pinned: bool = False, ctx: Context | None = None) -> dict:
+@mcp.tool(description="Save a durable coding memory and return its id plus optional same-scope duplicate hints; merge a same-fact hint into the old memory. Never save secrets. Content is capped: put long material in a file and save a short summary plus its path. Set review_after (YYYY-MM-DD, usually about 14 days out) for status, handoff, or in-progress notes.")
+def memory_save(content: str, title: str | None = None, kind: str = "note", tags: str | None = None, scope: str = "project", pinned: bool = False, review_after: str | None = None, ctx: Context | None = None) -> dict:
     def work():
         _, project = _client(); selected = None if scope == "global" else project
         if scope not in ("project", "global"): raise ValueError("scope must be project or global")
         if kind not in {"note","decision","preference","snippet","todo"}: raise ValueError("invalid kind")
+        validate_content(content)
+        review = validate_review_after(review_after)
         with connection() as conn:
-            cur = conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,created_at,updated_at,source_agent) VALUES (?,?,?,?,?,?,?,?,?)",
-              (selected, kind, title or content[:80], content, tags or "", int(pinned), now(), now(), _client_name or "mcp-client"))
+            cur = conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,review_after,created_at,updated_at,source_agent) VALUES (?,?,?,?,?,?,?,?,?,?)",
+              (selected, kind, title or content[:80], content, tags or "", int(pinned), review, now(), now(), _client_name or "mcp-client"))
             result = {"id": cur.lastrowid}
             conn.commit()  # loading the embedding model can take seconds; do not hold the write lock meanwhile
             if os.environ.get("DEVMEM_EMBED") != "0":
@@ -214,7 +216,7 @@ def memory_save(content: str, title: str | None = None, kind: str = "note", tags
                 except Exception as exc:  # hints are optional; the memory is already saved
                     print(f"devmem: similar check skipped: {type(exc).__name__}: {exc}"[:250], file=sys.stderr)
             return result
-    return _call("memory_save", {"title": title, "kind": kind, "scope": scope, "pinned": pinned}, work, ctx)
+    return _call("memory_save", {"title": title, "kind": kind, "scope": scope, "pinned": pinned, "review_after": review_after}, work, ctx)
 
 
 @mcp.tool(description="Search before non-trivial work. If project scope is empty, retry scope='all' because the server cwd may differ from the repo. Uses hybrid ranking; match is keyword, semantic, or both.")
@@ -272,17 +274,19 @@ def memory_unlink(from_id: int, to_id: int, type: str | None = None, ctx: Contex
     return _call("memory_unlink", {"from_id": from_id, "to_id": to_id, "type": type}, work, ctx)
 
 
-@mcp.tool(description="Correct an existing memory when a fact changes; its prior version is kept in history. Never use for secrets.")
-def memory_update(id: int, content: str | None = None, title: str | None = None, tags: str | None = None, kind: str | None = None, pinned: bool | None = None, ctx: Context | None = None) -> dict:
+@mcp.tool(description="Correct an existing memory when a fact changes; its prior version is kept in history. Never use for secrets. Content is capped: put long material in a file and save a short summary plus its path. Set review_after (YYYY-MM-DD, usually about 14 days out) for status, handoff, or in-progress notes.")
+def memory_update(id: int, content: str | None = None, title: str | None = None, tags: str | None = None, kind: str | None = None, pinned: bool | None = None, review_after: str | None = None, ctx: Context | None = None) -> dict:
     def work():
-        fields = {k:v for k,v in {"content":content,"title":title,"tags":tags,"kind":kind,"pinned":pinned}.items() if v is not None}
+        fields = {k:v for k,v in {"content":content,"title":title,"tags":tags,"kind":kind,"pinned":pinned,"review_after":review_after}.items() if v is not None}
         if kind and kind not in {"note","decision","preference","snippet","todo"}: raise ValueError("invalid kind")
+        if content is not None: validate_content(content)
+        if review_after is not None: fields["review_after"] = validate_review_after(review_after)
         if not fields: return _get(id) or {"id": id, "missing": True}
         fields["updated_at"] = now()
         with connection() as conn:
             conn.execute("UPDATE memories SET " + ", ".join(f"{k}=?" for k in fields) + " WHERE id=?", (*fields.values(), id))
         return _get(id) or {"id": id, "missing": True}
-    return _call("memory_update", {"id":id, "pinned":pinned}, work, ctx)
+    return _call("memory_update", {"id":id, "pinned":pinned, "review_after":review_after}, work, ctx)
 
 
 @mcp.tool(description="Delete a memory only when it is obsolete, duplicate, or incorrect.")
@@ -334,7 +338,7 @@ def memory_list(limit: int = 20, kind: str | None = None, scope: str = "project"
         _, project = _client(); where, params = _scope(scope, project)
         if kind: where += " AND kind=?"; params += (kind,)
         with connection() as conn:
-            return [dict(r) for r in conn.execute(f"SELECT id,title,kind,project,tags,pinned,updated_at FROM memories WHERE {where} ORDER BY updated_at DESC LIMIT ?", (*params, max(1,min(limit,100)))).fetchall()]
+            return [{**dict(r), "stale": is_stale(r["review_after"])} for r in conn.execute(f"SELECT id,title,kind,project,tags,pinned,review_after,updated_at FROM memories WHERE {where} ORDER BY updated_at DESC LIMIT ?", (*params, max(1,min(limit,100)))).fetchall()]
     return _call("memory_list", {"limit":limit,"kind":kind,"scope":scope}, work, ctx)
 
 

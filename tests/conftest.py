@@ -7,6 +7,8 @@ from devmem import ado, mcp_server
 @pytest.fixture(autouse=True)
 def _test_db(monkeypatch, tmp_path):
     monkeypatch.setenv("DEVMEM_DB", str(tmp_path / "devmem.db"))
+    monkeypatch.setenv("DEVMEM_BACKUP_DIR", str(tmp_path / "backups"))
+    monkeypatch.setenv("DEVMEM_AUDIT", str(tmp_path / "audit.json"))
     monkeypatch.setenv("DEVMEM_ADO_CONFIG", str(tmp_path / "ado.json"))
     monkeypatch.delenv("DEVMEM_ADO_ORG", raising=False)
     monkeypatch.delenv("DEVMEM_ADO_PROJECT", raising=False)
