@@ -7,8 +7,8 @@
 (function () {
   "use strict";
 
-  var KIND_COLORS = { note: "#60a5fa", decision: "#a78bfa", preference: "#f472b6", snippet: "#34d399", todo: "#fb923c" };
-  var LINK_COLORS = { blocks: "#fb923c", depends_on: "#fbbf24", relates_to: "#94a3b8", overlaps: "#64748b", fixes: "#34d399", supersedes: "#78716c" };
+  var KIND_COLORS = { note: "#88a8c9", decision: "#aa9dc5", preference: "#c7959c", snippet: "#90b697", todo: "#ccb484" };
+  var LINK_COLORS = { blocks: "#f47c70", depends_on: "#ccb484", relates_to: "#9c9890", overlaps: "#66635d", fixes: "#90b697", supersedes: "#4a463f" };
   var R = 120;                       // overall web radius (world units)
   var ADDITIVE = 2;                  // THREE.AdditiveBlending
 
@@ -26,19 +26,19 @@
     var nodes = [], links = [], nodeById = {}, linkByKey = {};
     var pendingGraph = null, pendingBloom = {}, anims = [], lastImpulse = {};
     var active = true, ready = false, fitted = false, resumeTimer = null, loopOn = false, lastTwinkle = 0;
-    var texCache = {}, geomCache = {};
-    var bloomPass = null, bloomAdded = false, bloomEnabled = true, bloomError = "";
+    var texCache = {}, geomCache = {}, lastUserMove = 0, fitTimer = null;
+    var bloomPass = null, bloomAdded = false, bloomEnabled = false, bloomError = "";
 
-    try { bloomEnabled = localStorage.getItem("devmem.glow") !== "0"; } catch (e) { /* default on */ }
+    try { bloomEnabled = localStorage.getItem("devmem.bloom") === "1"; } catch (e) { /* default off */ }
 
     function bloomActive() { return !!(bloomPass && bloomPass.enabled); }
 
     function haloBaseSize(n) {
       var size = n.radius * (n.type === "hub" ? 10 : n.type === "project" ? 7 : n.type === "agent" ? 9 : 6);
-      return size * (bloomActive() ? 0.62 : 1);
+      return size * (bloomActive() ? 0.62 : 0.5);
     }
 
-    function haloOpacity(n) { return n.baseGlow * (bloomActive() ? 0.42 : 1); }
+    function haloOpacity(n) { return n.baseGlow * (bloomActive() ? 0.42 : 0.3); }
 
     function syncHalos() {
       for (var i = 0; i < nodes.length; i++) {
@@ -86,7 +86,7 @@
 
     function setGlow(on) {
       bloomEnabled = on;
-      try { localStorage.setItem("devmem.glow", on ? "1" : "0"); } catch (e) { /* storage unavailable */ }
+      try { localStorage.setItem("devmem.bloom", on ? "1" : "0"); } catch (e) { /* storage unavailable */ }
       if (bloomPass) bloomPass.enabled = on;
       syncHalos();
       var button = document.getElementById("glow-toggle");
@@ -102,7 +102,7 @@
     }
 
     Graph.renderer().setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-    Graph.backgroundColor("#050814")
+    Graph.backgroundColor("#030201")
       .showNavInfo(false)
       .enableNodeDrag(false)
       .nodeId("id")
@@ -114,7 +114,7 @@
       .linkWidth(0)
       .linkColor(function (l) { return l.color; })
       .linkDirectionalParticles(function (l) { return l.particles || 0; })
-      .linkDirectionalParticleColor(function (l) { return l.pcolor || "#ffffff"; })
+      .linkDirectionalParticleColor(function (l) { return l.pcolor || "#efebe4"; })
       .linkDirectionalParticleWidth(function (l) { return l.pwidth || 1.6; })
       .linkDirectionalParticleSpeed(function (l) { return l.kind === "ah" ? 0.016 : 0.035; })
       .linkDirectionalParticleResolution(6)
@@ -124,7 +124,7 @@
         else if (n.type === "memory") location.href = "/memory?q=" + encodeURIComponent(n.title || "");
       })
       .onEngineStop(function () {
-        if (!fitted && nodes.length > 2) { fitted = true; Graph.zoomToFit(900, 30); }
+        fit(900);
       });
 
     var glowButton = document.getElementById("glow-toggle");
@@ -258,11 +258,11 @@
       var key = text + "|" + color;
       if (texCache[key]) return texCache[key];
       var c = document.createElement("canvas"), x = c.getContext("2d"), fs = 44;
-      x.font = "600 " + fs + "px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+      x.font = "500 " + fs + "px Switzer, system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
       var w = Math.ceil(x.measureText(text).width) + 28;
       c.width = w; c.height = fs + 22;
-      x.font = "600 " + fs + "px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
-      x.fillStyle = "rgba(5,8,20,0.62)";
+      x.font = "500 " + fs + "px Switzer, system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+      x.fillStyle = "rgba(3,2,1,0.78)";
       roundRect(x, 0, 0, w, c.height, 14);
       x.fill();
       x.fillStyle = color;
@@ -327,7 +327,7 @@
       if (n.type === "project" || n.type === "agent" || n.type === "hub") {
         var text = n.type === "agent" ? agentShort(n.agent) + " · " + (n.name || "") : n.name;
         if (text.length > 26) text = text.slice(0, 25) + "…";
-        label = quad(labelTexture(text, n.type === "agent" ? color : "#ede9fe"), 0xffffff, n.type === "agent" ? 5 : n.type === "hub" ? 7.5 : 6.5, false, 0.95);
+        label = quad(labelTexture(text, n.type === "agent" ? color : "#cecac3"), 0xffffff, n.type === "agent" ? 5 : n.type === "hub" ? 7.5 : 6.5, false, 0.95);
         label.position.y = n.radius + (n.type === "agent" ? 6 : n.type === "hub" ? 10 : 8);
         g.add(label);
       }
@@ -355,18 +355,18 @@
         next.push(n); byId[id] = n;
         return n;
       }
-      keep("__brain__", { type: "hub", name: "Brain", radius: 12, color: "#e9d5ff", baseGlow: 1, val: 18, fx: 0, fy: 0, fz: 0 });
+      keep("__brain__", { type: "hub", name: "Brain", radius: 12, color: "#efebe4", baseGlow: 1, val: 18, fx: 0, fy: 0, fz: 0 });
       var side = 1;
       (g.projects || []).forEach(function (p) {
         var n = keep("p:" + p.id, { type: "project", project: p.id, name: p.name, path: p.path, memories: p.memories, activity: p.activity,
-          radius: Math.min(9, 4.2 + Math.sqrt(p.memories || 0) * 0.7), color: p.id === "other" ? "#64748b" : "#8b5cf6", baseGlow: 0.55, val: 10 });
+          radius: Math.min(9, 4.2 + Math.sqrt(p.memories || 0) * 0.7), color: p.id === "other" ? "#66635d" : "#9c9890", baseGlow: 0.55, val: 10 });
         if (!n.side) { n.side = side; side = -side; }
         if (n.x === undefined) { n.x = n.side * R * 0.5 + (Math.random() - 0.5) * 40; n.y = (Math.random() - 0.5) * 60; n.z = (Math.random() - 0.5) * 60; }
       });
       (g.memories || []).forEach(function (m) {
         var fresh = !nodeById["m:" + m.id];
         var n = keep("m:" + m.id, { type: "memory", mid: m.id, title: m.title, kind: m.kind, cluster: m.cluster, project: m.project,
-          radius: 1.5, color: KIND_COLORS[m.kind] || "#94a3b8", baseGlow: 0.42, val: 1 });
+          radius: 1.5, color: KIND_COLORS[m.kind] || "#9c9890", baseGlow: 0.42, val: 1 });
         if (fresh) {
           var parent = byId[m.cluster === "global" ? "__brain__" : "p:" + m.cluster];
           if (parent && parent.x !== undefined) {
@@ -394,16 +394,16 @@
           var parent = n.cluster === "global" ? "__brain__" : "p:" + n.cluster;
           if (!byId[parent]) return;
           var k = perCluster[parent] = (perCluster[parent] || 0) + 1;
-          link(parent, n.id, n.cluster === "global" ? "hm" : "pm", n.cluster === "global" ? "#6d5fd6" : "#5b5bd6", Math.sqrt(k) * 2.2);
+          link(parent, n.id, n.cluster === "global" ? "hm" : "pm", n.cluster === "global" ? "#4a463f" : "#3a3631", Math.sqrt(k) * 2.2);
         } else if (n.type === "agent") {
           link(n.id, "__brain__", "ah", n.color);
         } else if (n.type === "project") {
-          link("__brain__", n.id, "hp", "#6d5fd6");
+          link("__brain__", n.id, "hp", "#4a463f");
         }
       });
       (g.links || []).forEach(function (l) {
         if (!byId["m:" + l.from_id] || !byId["m:" + l.to_id]) return;
-        link("m:" + l.from_id, "m:" + l.to_id, "ml", LINK_COLORS[l.type] || "#94a3b8", 0, ":" + l.type);
+        link("m:" + l.from_id, "m:" + l.to_id, "ml", LINK_COLORS[l.type] || "#9c9890", 0, ":" + l.type);
         var edge = nextLinks[nextLinks.length - 1];
         edge.particles = /^(blocks|depends_on|supersedes)$/.test(l.type) ? 1 : 0;
         edge.pwidth = 0.8; edge.pcolor = edge.color;
@@ -411,6 +411,7 @@
       nodes = next; nodeById = byId; links = nextLinks; linkByKey = nextKeys;
       syncHalos();
       Graph.graphData({ nodes: nodes, links: links });
+      if (!fitted) fitSoon(1500);
       startLoop();
     }
 
@@ -535,11 +536,45 @@
     }
 
     // ---------------------------------------------------------------- lifecycle
+    // Live updates keep reheating the layout, so the engine may never stop: fit on settle, after the
+    // first data and after a resize, but leave the camera alone for 20 s after the user orbits or zooms.
+    var USER_HOLD_MS = 20000;
+
+    function fit(ms) {
+      if (nodes.length <= 2 || Date.now() - lastUserMove < USER_HOLD_MS) return;
+      // The hub sits at the origin and the camera orbits it: set the distance so the hub, projects and agents
+      // fill the view; outlying memory leaves may run to the edges instead of shrinking the web.
+      var reach = 0;
+      nodes.forEach(function (n) {
+        if (n.type === "memory" || n.x === undefined) return;
+        reach = Math.max(reach, Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z) + (n.radius || 0));
+      });
+      if (!reach) return;
+      var first = !fitted;   // jump on page load, glide on later refits
+      fitted = true;
+      var camera = Graph.camera(), rect = container.getBoundingClientRect();
+      var half = Math.PI * camera.fov / 360, aspect = rect.width / Math.max(1, rect.height);
+      var fitHalf = Math.min(half, Math.atan(Math.tan(half) * aspect));
+      var distance = reach / Math.sin(fitHalf) * 1.04;
+      var pos = Graph.cameraPosition(), len = Math.sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z) || 1;
+      Graph.cameraPosition({ x: pos.x / len * distance, y: pos.y / len * distance, z: pos.z / len * distance }, { x: 0, y: 0, z: 0 }, first ? 0 : ms);
+    }
+
+    function fitSoon(delay) {
+      clearTimeout(fitTimer);
+      fitTimer = setTimeout(function () { fit(700); }, delay);
+    }
+
+    ["pointerdown", "wheel"].forEach(function (type) {
+      container.addEventListener(type, function () { lastUserMove = Date.now(); }, { passive: true });
+    });
+
     function resize() {
       var r = container.getBoundingClientRect();
       if (r.width > 10 && r.height > 10) {
         Graph.width(r.width).height(r.height);
         resizeBloom(r.width, r.height);
+        if (fitted) fitSoon(300);
       }
     }
 

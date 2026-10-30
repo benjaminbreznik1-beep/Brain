@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %}Subagent · Brain{% endblock %}
+{% block body %}
+<h1>{{ agent.agent_type or 'subagent' }}</h1>
+<p class="muted back-row">{% if agent.thread_id %}<a href="/messages?chat={{ ('s:' ~ agent.session_id) | urlencode }}">Back to chat</a><a href="/messages/thread/{{ agent.thread_id }}">Thread</a>{% endif %}<span>{{ agent.description or '' }}</span></p>
+<div class="grid-cards">
+  <div class="card"><div class="stat-label">Status</div><div class="stat-value"><span class="badge st-{{ agent.status }}">{{ agent.status }}</span></div></div>
+  <div class="card"><div class="stat-label">Started</div><div><time data-rel datetime="{{ agent.started_at }}">{{ agent.started_at }}</time></div>
+    <div class="stat-label stat-gap">Last activity</div><div><time data-rel datetime="{{ agent.last_activity_at }}">{{ agent.last_activity_at }}</time></div></div>
+  <div class="card"><div class="stat-label">Tokens</div><div class="stat-value" data-tokens="{{ agent.tokens }}">{{ agent.tokens }}</div></div>
+  <div class="card"><div class="stat-label">Parent session</div><div class="mono"><a href="/sessions/{{ agent.session_id }}">{{ agent.session_id }}</a></div>
+    {% if agent.project %}<div class="muted mono">{{ agent.project }}</div>{% endif %}</div>
+</div>
+<h2>Task</h2>
+<pre class="card msg-body">{{ agent.task or 'No task recorded.' }}</pre>
+<h2>Tool calls</h2>
+<table><thead><tr><th>Time</th><th>Tool</th><th>Argument</th></tr></thead><tbody>
+{% for t in agent.tools %}<tr><td><time data-rel datetime="{{ t.ts }}">{{ t.ts }}</time></td><td class="mono">{{ t.name }}</td><td class="mono muted">{{ t.arg }}</td></tr>
+{% else %}<tr><td colspan="3" class="muted">No tool calls yet.</td></tr>{% endfor %}
+</tbody></table>
+{% if agent.texts %}<h2>Remarks</h2>
+<table><thead><tr><th>Time</th><th>From</th><th>Text</th></tr></thead><tbody>
+{% for t in agent.texts %}<tr><td><time data-rel datetime="{{ t.ts }}">{{ t.ts }}</time></td><td class="muted">{{ 'parent' if t.role == 'parent' else 'agent' }}</td><td class="msg-body">{{ t.body }}</td></tr>{% endfor %}
+</tbody></table>{% endif %}
+<h2>Report</h2>
+<pre class="card msg-body">{% if agent.report %}{{ agent.report }}{% elif agent.status == 'stopped' %}No report: the agent stopped (no write for 2 hours) without finishing.{% else %}Still {{ agent.status }}; the report appears when it finishes.{% endif %}</pre>
+{% endblock %}

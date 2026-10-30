@@ -2,7 +2,7 @@
 {% block title %}Session · Brain{% endblock %}
 {% block body %}
 <h1>Session <span class="mono">{{ session_id }}</span></h1>
-<div class="card"><svg id="timeline" class="chart"></svg></div>
+<div class="card"><svg id="timeline" class="chart" role="img" aria-label="Tokens per usage event"></svg></div>
 
 <h2>Tool activity</h2>
 <table>
@@ -27,7 +27,7 @@
   <tbody>
   {% for x in events %}
     <tr>
-      <td class="mono">{{ x.ts }}</td>
+      <td class="mono"><time datetime="{{ x.ts }}" title="{{ x.ts }}">{{ x.ts | when(True) }}</time></td>
       <td class="num">{{ x.input_tokens }}</td>
       <td class="num">{{ x.output_tokens }}</td>
       <td class="num">{{ x.cache_read_tokens }}</td>
@@ -43,7 +43,7 @@
     const e = {{ events | tojson }};
     const rows = e.slice(-120).map(x => ({ x: x.ts, series: {
       input: x.input_tokens, output: x.output_tokens, cache: x.cache_read_tokens + x.cache_write_tokens } }));
-    devmem.barChart(document.querySelector('#timeline'), rows, { input: '#a78bfa', output: '#22d3ee', cache: '#3b4a7a' });
+    devmem.barChart(document.querySelector('#timeline'), rows, { input: '#cecac3', output: '#6db0f4', cache: '#403d37' });
   })();
 </script>
 {% endblock %}

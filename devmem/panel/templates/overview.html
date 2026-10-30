@@ -8,16 +8,39 @@
   {% for x in totals %}
   <div class="card">
     <span class="badge {{ x.agent }}">{{ x.agent }}</span>
-    <div class="stat-label" style="margin-top:.6rem">Today</div>
+    <div class="stat-label stat-gap">Today</div>
     <div class="stat-value" data-tokens="{{ x.today or 0 }}">{{ x.today or 0 }}</div>
-    <div class="muted">7d <span data-tokens="{{ x.week or 0 }}">{{ x.week or 0 }}</span>
-      · 30d <span data-tokens="{{ x.month or 0 }}">{{ x.month or 0 }}</span></div>
+    <div class="muted meta"><span>7d <span class="mono" data-tokens="{{ x.week or 0 }}">{{ x.week or 0 }}</span></span>
+      <span>30d <span class="mono" data-tokens="{{ x.month or 0 }}">{{ x.month or 0 }}</span></span></div>
   </div>
   {% endfor %}
 </div>
 
+<div class="card panel-tokens" id="tokens">
+  <div class="tok-block">
+    <h3>Today</h3>
+    <div class="tok-big" id="tok-today">0</div>
+    <div class="tok-split" id="tok-today-split"></div>
+  </div>
+  <div class="tok-block">
+    <h3>7 days</h3>
+    <div class="tok-big" id="tok-week">0</div>
+    <div class="tok-split" id="tok-week-split"></div>
+  </div>
+  <div class="tok-block tok-spark">
+    <h3>Last 24 h <span class="hint">tokens / hour</span></h3>
+    <svg id="spark" preserveAspectRatio="none" role="img" aria-label="Tokens per hour, last 24 hours"></svg>
+  </div>
+  <div class="tok-block tok-models">
+    <h3>Models today
+      <span class="hint seg-legend"><span><span class="sw s-in"></span>in</span> <span><span class="sw s-out"></span>out</span> <span><span class="sw s-cr"></span>cache r</span> <span><span class="sw s-cw"></span>cache w</span></span>
+    </h3>
+    <ul id="models"></ul>
+  </div>
+</div>
+
 <h2>Daily tokens, last 30 days</h2>
-<div class="card"><svg id="chart" class="chart"></svg></div>
+<div class="card"><svg id="chart" class="chart" role="img" aria-label="Daily tokens per agent, last 30 days"></svg></div>
 
 <h2>Limits</h2>
 <table>
@@ -26,9 +49,9 @@
   {% for x in limits %}
     <tr>
       <td><span class="badge {{ x.agent }}">{{ x.agent }}</span></td>
-      <td>{{ x.label }}{% if x.window_minutes %} <span class="muted">({{ x.window_minutes }} min)</span>{% endif %}</td>
+      <td title="{{ x.label }}{% if x.window_minutes %}, {{ x.window_minutes }} min{% endif %}">{{ x | window_label }}</td>
       <td class="num">{{ x.used_percent }}%</td>
-      <td>{{ x.resets_at or '—' }}</td>
+      <td class="mono">{% if x.resets_at %}<time datetime="{{ x.resets_at }}" title="{{ x.resets_at }}">{{ x.resets_at | when }}</time>{% else %}—{% endif %}</td>
       <td><time data-rel datetime="{{ x.as_of }}">{{ x.as_of }}</time>{% if x.stale %} <span class="badge">stale</span>{% endif %}</td>
     </tr>
   {% else %}
@@ -61,6 +84,9 @@
       return { x: day, series };
     });
     devmem.barChart(document.querySelector('#chart'), rows, devmem.agentColors);
+    const tokens = {{ tokens | tojson }};
+    devmem.renderTokens(tokens);
+    window.addEventListener('resize', () => devmem.renderSpark(tokens.hourly || {}));
   })();
 </script>
 {% endblock %}

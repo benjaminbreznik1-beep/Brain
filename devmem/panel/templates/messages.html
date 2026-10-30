@@ -1,0 +1,79 @@
+{% extends 'base.html' %}
+{% block title %}Messages · Brain{% endblock %}
+{% block body_class %}chat-body{% endblock %}
+{% block main %}
+{% macro parts(items) %}{% for p in items %}<span class="part">{{ p }}</span>{% endfor %}{% endmacro %}
+{% set qs = [] %}
+{% for name in ('project', 'agent', 'kind', 'status') %}{% if filters[name] %}{% set _ = qs.append(name ~ '=' ~ (filters[name] | urlencode)) %}{% endif %}{% endfor %}
+{% if filters.question %}{% set _ = qs.append('question=1') %}{% endif %}
+{% set filter_qs = ('&' ~ qs | join('&')) if qs else '' %}
+<main class="chat-app{% if chat %} has-chat{% endif %}" id="chat-app" data-filters="{{ filter_qs }}">
+  <aside class="chat-list-pane">
+    <div class="chat-list-head">
+      <h1>Messages</h1>
+      <details class="chat-filters"{% if filter_qs %} open{% endif %}>
+        <summary>Filter{% if filter_qs %}, on{% endif %}</summary>
+        <form method="get" class="msg-filters">
+          <select name="project"><option value="">All projects</option>{% for p in facets.projects %}<option value="{{ p }}" {% if filters.project == p %}selected{% endif %}>{{ p }}</option>{% endfor %}</select>
+          <select name="agent"><option value="">All agents</option>{% for a in facets.agents %}<option value="{{ a }}" {% if filters.agent == a %}selected{% endif %}>{{ a }}</option>{% endfor %}</select>
+          <select name="kind"><option value="">All kinds</option>{% for k in kinds %}<option {% if filters.kind == k %}selected{% endif %}>{{ k }}</option>{% endfor %}</select>
+          <select name="status"><option value="">Any status</option>{% for st in ('open', 'answered', 'closed') %}<option {% if filters.status == st %}selected{% endif %}>{{ st }}</option>{% endfor %}</select>
+          <label class="muted"><input type="checkbox" name="question" value="1" {% if filters.question %}checked{% endif %}> with a question</label>
+          <button>Apply</button>{% if filter_qs %} <a href="/messages">Clear filters</a>{% endif %}
+        </form>
+      </details>
+    </div>
+    <ul class="chat-list" id="chat-list">
+      {% for c in chats %}
+      <li class="chat-row{% if chat and chat.key == c.key %} on{% endif %}">
+        <a href="/messages?chat={{ c.key | urlencode }}{{ filter_qs }}">
+          <span class="avatar k-{{ c.kind }}" style="--h:{{ c.hue }}">{{ '#' if c.kind == 'c' else (c.title[:1] | upper) }}</span>
+          <span class="cr-main">
+            <span class="cr-top"><b class="cr-title">{{ parts(c.title_parts or [c.title]) }}</b><time data-rel datetime="{{ c.last_at }}">{{ c.last_at }}</time></span>
+            <span class="cr-bottom"><span class="cr-preview">{% if c.running %}<span class="cr-live" title="agents still working">●</span> {% endif %}{{ parts(c.state_parts or [c.state]) }}</span>{% if c.unread %}<span class="msg-badge" title="unread">{{ c.unread }}</span>{% endif %}</span>
+            <span class="cr-preview">{{ c.headline }}</span>
+          </span>
+        </a>
+      </li>
+      {% else %}
+      <li class="chat-none muted">No chats{% if filter_qs %} match these filters{% endif %}. Subagent runs and <span class="mono">message_post</span> threads show up here.</li>
+      {% endfor %}
+    </ul>
+  </aside>
+  <section class="chat-pane" id="chat-pane">
+    {% if chat %}
+    <header class="chat-head">
+      <a class="chat-back" href="/messages{{ ('?' ~ filter_qs[1:]) if filter_qs else '' }}" aria-label="Back to chats">←</a>
+      <div class="ch-main">
+        <b class="ch-title">{{ parts(chat.title_parts or [chat.title]) }}</b>
+        <div class="ch-members" id="chat-members">{% for key, m in chat.members.items() %}<span class="chip">{{ m.name }}</span>{% endfor %}</div>
+      </div>
+      <button type="button" id="headline-toggle" class="ghost">Headlines</button>
+      {% if chat.kind == 't' and chat.thread_ids %}
+        {% if chat.status == 'closed' %}<form method="post" action="/messages/thread/{{ chat.thread_ids[0] }}/reopen"><button>Reopen</button></form>
+        {% else %}<form method="post" action="/messages/thread/{{ chat.thread_ids[0] }}/close"><button>Close</button></form>{% endif %}
+      {% endif %}
+    </header>
+    <div class="chat-scroll" id="chat-scroll"><div class="chat-items" id="chat-items">
+      {# Server copy for a first paint without scripts; chat.js re-renders it with bubbles, day separators and live updates. #}
+      {% for item in chat["items"] %}{% if item.type == 'bubble' %}<div class="bubble {{ 'mine' if item.mine else 'theirs' }}"><div class="b-who">{{ chat.members[item.who].name if item.who in chat.members else item.who }}</div><div class="b-text">{{ item.text }}</div></div>{% endif %}{% endfor %}
+    </div></div>
+    <button type="button" class="new-pill" id="new-pill" hidden>↓ new messages</button>
+    <form class="chat-input" id="chat-form" method="post" action="/messages/chat/send">
+      <input type="hidden" name="key" value="{{ chat.key }}">
+      <textarea name="body" id="chat-body" rows="1" maxlength="8000" required placeholder="Message{% if chat.target %} {{ chat.target.name }}{% endif %}"></textarea>
+      <button title="Send (Enter); Shift+Enter for a new line">Send</button>
+    </form>
+    <p class="chat-error" id="chat-error" hidden></p>
+    <p class="muted">{% if dispatch.enabled %}Automatic replies are on. Requests are routed to Claude or Codex, with one fallback if needed.{% else %}Automatic replies are off. Messages can still reach agents checking their inboxes.{% endif %}{% if dispatch.error %} {{ dispatch.error }}{% endif %}</p>
+    <script id="chat-data" type="application/json">{{ chat | tojson }}</script>
+    {% else %}
+    <div class="chat-empty muted">
+      <p>Pick a chat. Each Claude Code session is one chat: its subagents' tasks, remarks, tool calls and reports, plus anything posted with <span class="mono">message_post</span>.</p>
+      <p>Your replies go to the agent with an open question, else to the last one that spoke; an agent waiting in <span class="mono">message_wait</span> gets them right away.</p>
+    </div>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}
+{% block scripts %}<script src="{{ asset('chat.js') }}"></script>{% endblock %}

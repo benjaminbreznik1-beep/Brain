@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Iterator
@@ -11,6 +12,8 @@ from ..db import iso, parse_ts
 TOOL_TYPES = ("function_call", "custom_tool_call", "local_shell_call")
 TURN_TYPES = ("task_started", "task_complete")
 DEFAULT_WINDOWS = {"primary": 300, "secondary": 10080}
+TASK_MAX, REMARK_MAX, COMMAND_MAX = 2000, 500, 80
+HANDOFF = re.compile(r"\b\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*\b")
 
 
 def _resets_at(limit: dict[str, Any], ts: Any) -> str | None:
@@ -89,6 +92,76 @@ def parse_record(line: str, context: dict[str, Any]) -> tuple[dict[str, Any] | N
             "reasoning_tokens": int(usage.get("reasoning_output_tokens", usage.get("reasoning_output", 0)) or 0),
         }
     return event, _limits(payload, obj.get("timestamp")), activities
+
+
+def _text(content: Any) -> str | None:
+    if isinstance(content, str): return content
+    if isinstance(content, list):
+        parts = [item.get("text") for item in content if isinstance(item, dict) and isinstance(item.get("text"), str)]
+        return "\n".join(parts) if parts else None
+    return None
+
+
+def _clean(text: str, size: int) -> str:
+    from .subagents import clean
+    return clean(text.strip(), size)
+
+
+def _arguments(payload: dict[str, Any]) -> dict[str, Any]:
+    value = payload.get("arguments", payload.get("input", payload.get("args", {})))
+    if not value and isinstance(payload.get("command"), str): value = {"command": payload["command"]}
+    if isinstance(value, str):
+        try: value = json.loads(value)
+        except ValueError: return {"command": value}
+    return value if isinstance(value, dict) else {}
+
+
+def _tool(payload: dict[str, Any]) -> tuple[str, str]:
+    from .subagents import short_arg
+    name = str(payload.get("name") or payload.get("call_id") or payload.get("type") or "tool")[:80]
+    args = _arguments(payload)
+    command = args.get("command") if isinstance(args.get("command"), str) else None
+    if command:
+        return name, _clean(" ".join(command.split()), COMMAND_MAX)
+    if name == "apply_patch" or name.endswith(".apply_patch"):
+        patch = args.get("patch") or args.get("input") or ""
+        paths = re.findall(r"(?:\+\+\+|---) [ab]/([^\s]+)|\*\*\* Update File: ([^\n]+)|\*\*\* Add File: ([^\n]+)", patch) if isinstance(patch, str) else []
+        touched = [next(part for part in match if part) for match in paths]
+        return name, _clean(", ".join(dict.fromkeys(touched)), 120)
+    if name.startswith("mcp__"):
+        bits = name.split("__")
+        return name, ".".join(bits[1:3]) if len(bits) >= 3 else name
+    return name, short_arg(args)
+
+
+def _is_task(text: str) -> bool:
+    plain = text.lstrip()
+    return bool(plain) and not (plain.startswith("<environment_context") or plain.startswith("<skills_instructions") or
+                                plain.startswith("<permissions") or plain.startswith("<agents_instructions"))
+
+
+def parse_agent_record(line: str, context: dict[str, Any]) -> dict[str, Any] | None:
+    """One safe, display-only Codex rollout record. parse_record owns shared context and token parsing."""
+    if context.get("devmem_spawned"): return None
+    try: obj = json.loads(line)
+    except json.JSONDecodeError: return None
+    if not isinstance(obj, dict): return None
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    typ, inner = obj.get("type"), payload.get("type")
+    rec = {"session_id": context.get("session_id"), "project": context.get("project"), "model": context.get("model"),
+           "ts": obj.get("timestamp"), "task": None, "text": None, "tools": [], "finished": False, "terminal": False}
+    if typ == "event_msg" and inner == "task_complete": rec["finished"] = rec["terminal"] = True
+    if typ != "response_item": return rec if rec["terminal"] else None
+    if inner in TOOL_TYPES: rec["tools"].append(_tool(payload)); return rec
+    if inner != "message": return None  # reasoning and tool output records are deliberately ignored
+    role, text = payload.get("role"), _text(payload.get("content"))
+    if role == "user" and isinstance(text, str) and _is_task(text):
+        rec["task"] = _clean(text, TASK_MAX); return rec
+    if role == "assistant" and isinstance(text, str) and text.strip():
+        rec["text"] = _clean(text, REMARK_MAX)
+        rec["report_text"] = _clean(text, 8000)
+        return rec
+    return None
 
 
 def parse_line(line: str, context: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:

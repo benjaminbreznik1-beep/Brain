@@ -4,9 +4,12 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
+import subprocess
+from pathlib import Path
 
-from .db import audit_memories, context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, project_for_cwd, readonly_connection
+from .db import audit_memories, context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, now, project_for_cwd, readonly_connection
 from .embed import get_embedder
 
 
@@ -27,6 +30,80 @@ def _hook_cwd() -> str:
         return cwd if isinstance(cwd, str) else os.getcwd()
     except Exception:
         return os.getcwd()
+
+
+def _maintain_log() -> Path:
+    return Path(os.environ.get("DEVMEM_MAINTAIN_LOG", "~/.devmem/maintain.log")).expanduser()
+
+
+def _open_maintain_log():
+    """Append handle for detached maintenance output; rotated at 1 MB so it cannot grow without bound."""
+    path = _maintain_log(); path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file() and path.stat().st_size > 1_000_000: path.replace(path.with_name(path.name + ".1"))
+    return open(path, "ab")
+
+
+def _log(message: str) -> None:
+    try:
+        with _open_maintain_log() as log: log.write(f"{now()} {message}\n".encode())
+    except OSError:
+        pass
+
+
+def _spawn_maintain(*args: str) -> None:
+    """Start a detached maintenance run that never shares the hook's stdin and logs its output and errors."""
+    try: log = _open_maintain_log()
+    except OSError: log = subprocess.DEVNULL
+    try:
+        subprocess.Popen([sys.executable, "-m", "devmem.cli", "maintain", *args], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    finally:
+        if log is not subprocess.DEVNULL: log.close()
+
+
+def _start_maintenance_if_due() -> None:
+    try:
+        from .maintenance import due_for_startup
+        if due_for_startup(): _spawn_maintain("--startup")
+    except Exception as exc:
+        _log(f"startup maintenance not started: {type(exc).__name__}: {exc}")
+
+
+def _maintain_child() -> bool:
+    """True inside a maintenance engine (claude -p) session: its hooks must not start more maintenance."""
+    from .maintenance import CHILD_ENV
+    return bool(os.environ.get(CHILD_ENV))
+
+
+def _session_end_hook() -> None:
+    """A SessionEnd hook must never delay or fail Claude; problems leave a line in the maintenance log."""
+    try:
+        if _maintain_child(): return
+        from .maintenance import config
+        cfg = config()
+        if not cfg["enabled"] and not cfg.get("error"): return
+        try:
+            payload = json.load(sys.stdin)
+        except Exception as exc:
+            payload = {}; _log(f"SessionEnd hook: unreadable hook input ({type(exc).__name__}); using the process cwd")
+        payload = payload if isinstance(payload, dict) else {}
+        cwd = payload.get("cwd")
+        if not isinstance(cwd, str):
+            cwd = os.getcwd(); _log("SessionEnd hook: no cwd in hook input; using the process cwd")
+        command = ["--session-end", "--project", project_for_cwd(cwd)]
+        if isinstance(payload.get("transcript_path"), str): command += ["--transcript", payload["transcript_path"]]
+        _spawn_maintain(*command)
+    except Exception as exc:
+        _log(f"SessionEnd hook failed: {type(exc).__name__}: {exc}")
+
+
+def _print_proposals(changes: list[dict]) -> None:
+    for change in changes:
+        target = f" -> #{change['target_id']}" if change.get("target_id") else ""
+        state = f"blocked: {change['blocked_by']}" if change.get("blocked_by") else "would apply"
+        print(f"#{change['memory_id']}{target} {change['action']} [{state}] {change.get('summary') or ''}")
+        if change.get("new_title"): print(f"    title: {change['new_title']}")
+        if change.get("new_content"): print("    " + str(change["new_content"]).replace("\n", "\n    "))
 
 
 def _context_for_cwd(cwd: str) -> str:
@@ -90,6 +167,16 @@ def main() -> None:
     context.add_argument("--hook", action="store_true")
     remind = sub.add_parser("remind")
     remind.add_argument("--hook", action="store_true")
+    maintain = sub.add_parser("maintain")
+    maintain.add_argument("--project")
+    maintain.add_argument("--dry-run", action="store_true")
+    maintain.add_argument("--limit", type=int)
+    maintain.add_argument("--session-end", action="store_true")
+    maintain.add_argument("--startup", action="store_true")
+    maintain.add_argument("--hook", action="store_true")
+    maintain.add_argument("--transcript")
+    cleanup = sub.add_parser("maintenance-cleanup")
+    cleanup.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.command == "mcp":
         from .mcp_server import run; run()
@@ -116,6 +203,7 @@ def main() -> None:
         for row in rows:
             print(f"#{row['id']}\t{row['title']}\t{row['size']} chars\t{row['updated_at']}\t{row['reason']}")
     elif args.command == "panel":
+        _start_maintenance_if_due()
         import uvicorn
         from .panel.app import _shutdown_event, app
 
@@ -129,6 +217,8 @@ def main() -> None:
         PanelServer(config).run()
     elif args.command == "context":
         try:
+            if args.hook and _maintain_child():
+                return
             if not db_path().is_file():
                 return
             briefing = _context_for_cwd(_hook_cwd() if args.hook else args.cwd or os.getcwd())
@@ -137,12 +227,39 @@ def main() -> None:
             if args.hook:
                 print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                           "additionalContext": f"{_HOOK_HEADER}\n{briefing}"}}))
+                # Deliberately after printing: a SessionStart briefing is never delayed or changed by maintenance.
+                sys.stdout.flush()
+                _start_maintenance_if_due()
             else:
                 print(briefing)
         except Exception as exc:
             print(f"devmem context: {exc}", file=sys.stderr)
     elif args.command == "remind":
         if args.hook: _remind_hook()
+    elif args.command == "maintain":
+        if args.hook:
+            if not args.session_end: parser.error("maintain --hook is only for the SessionEnd hook (--session-end --hook)")
+            _session_end_hook(); return
+        if args.limit is not None and args.limit < 1: parser.error("--limit must be at least 1")
+        from .maintenance import run
+        # SIGTERM becomes SystemExit, so the run row is marked as interrupted instead of staying 'running'.
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+        # Memories store the project's root (project_for_cwd), so a subdirectory must be normalised the same way.
+        project = project_for_cwd(args.project) if args.project else project_for_cwd(os.getcwd()) if args.session_end else None
+        trigger = "session_end" if args.session_end else "startup" if args.startup else "manual"
+        try:
+            result = run(trigger, project=project, dry_run=args.dry_run, limit=args.limit,
+                         transcript_path=args.transcript if args.session_end else None)
+        except BaseException as exc:
+            print(f"{now()} devmem maintain failed: {type(exc).__name__}: {exc}"[:500], file=sys.stderr)
+            raise SystemExit(1)
+        _print_proposals(result.pop("changes", []))
+        print(json.dumps(result, separators=(",", ":")))
+        if result["status"] == "error": raise SystemExit(1)
+    elif args.command == "maintenance-cleanup":
+        from .maintenance import cleanup
+        result = cleanup(dry_run=args.dry_run)
+        print(result.get("line") or result["status"])
     else:
         if not fts_query(args.q): return
         with connection() as conn:

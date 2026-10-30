@@ -4,19 +4,22 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .. import messages as msgs
 from ..db import audit_memories, connection, ensure_embeddings, fts_query, hybrid_search, is_stale, now, validate_content, validate_review_after
 from ..embed import get_embedder
 from ..ingest.runner import ingest_all
@@ -25,9 +28,47 @@ from . import state as live
 
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
+
+
+def asset(path: str) -> str:
+    """Static URL tagged with the file's mtime: an edited script is fetched again instead of served from the browser cache."""
+    try: version = int((HERE / "static" / path).stat().st_mtime)
+    except OSError: version = 0
+    return f"/static/{path}?v={version}"
+
+
+templates.env.globals["asset"] = asset
+
+
+def when(value, seconds: bool = False) -> str:
+    """An ISO timestamp as local time with its zone ("30 Oct 07:36 CET"); anything else is shown as given."""
+    if not value or not isinstance(value, str): return value or ""
+    text = re.sub(r"(\.\d{6})\d+", r"\1", value.strip()).replace("Z", "+00:00")
+    try: parsed = datetime.fromisoformat(text)
+    except ValueError: return value
+    if "T" not in text and " " not in text: return f"{parsed.day} {parsed:%b %Y}"
+    if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=UTC)
+    local = parsed.astimezone()
+    return f"{local.day} {local:%b %H:%M{':%S' if seconds else ''} %Z}"
+
+
+def window_label(limit) -> str:
+    """A usage-limit window named the way the Brain gauges name it: 5h, weekly, weekly opus, 2d."""
+    label, minutes = limit.get("label") or "", limit.get("window_minutes")
+    named = {"five_hour": "5h", "seven_day": "weekly"}
+    if label in named: return named[label]
+    if label.startswith("seven_day_"): return "weekly " + label.removeprefix("seven_day_").replace("_", " ")
+    base = "5h" if minutes == 300 else "weekly" if minutes == 10080 else (f"{minutes // 1440}d" if minutes % 1440 == 0 else f"{round(minutes / 60)}h") if minutes else label
+    prefix = label.split(":")[0] + " " if ":" in label[1:] else ""
+    return prefix + base
+
+
+templates.env.filters["when"] = when
+templates.env.filters["window_label"] = window_label
 log = logging.getLogger("devmem.panel")
 
 INGEST_EVERY_S = 5
+PRUNE_EVERY_S = 3600
 STREAM_EVERY_S = 2.5
 STATE_TTL_S = 2.0
 ADO_REFRESH_S = 5 * 60
@@ -44,7 +85,16 @@ def _rows(sql, params=()):
 
 def _ingest_loop(stop: threading.Event):
     last_ingest_error = last_embedding_error = None
+    pruned_at = 0.0
     while True:
+        if time.monotonic() - pruned_at > PRUNE_EVERY_S:  # message retention works even when maintenance is disabled
+            try:
+                from ..maintenance import prune_messages
+                prune_messages()
+            except Exception:
+                log.exception("message pruning failed")
+            finally:
+                pruned_at = time.monotonic()
         try:
             ingest_all()
         except Exception as exc:  # dashboard remains usable if one log is malformed/unreadable
@@ -276,26 +326,47 @@ _cache = StateCache()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from ..dispatch import loop as dispatch_loop
     stop = threading.Event()
     thread = threading.Thread(target=_ingest_loop, args=(stop,), daemon=True)
     ado_thread = threading.Thread(target=_ado_loop, args=(stop,), daemon=True)
+    dispatch_thread = threading.Thread(target=dispatch_loop, args=(stop,), daemon=True)
     thread.start()
     ado_thread.start()
+    dispatch_thread.start()
     try:
         yield
     finally:
         stop.set()
         thread.join(timeout=1)
         ado_thread.join(timeout=1)
+        dispatch_thread.join(timeout=5)
 
 
 app = FastAPI(title="devmem", lifespan=lifespan)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+
+
+@app.middleware("http")
+async def same_origin_writes(request: Request, call_next):
+    """fix(2026-10-28): refuse cross-site writes. Any page in the browser could otherwise auto-submit a forged user reply that a waiting
+    agent acts on, or revert maintenance. Browsers send Origin / Sec-Fetch-Site on every POST; scripts without them are not browsers."""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        site, origin = request.headers.get("sec-fetch-site"), request.headers.get("origin")
+        own = f"{request.url.scheme}://{request.headers.get('host', '')}"
+        if (site is not None and site not in ("same-origin", "none")) or (origin is not None and origin != own):
+            return PlainTextResponse("cross-site request refused", 403)
+    return await call_next(request)
 app.mount("/static", StaticFiles(directory=str(HERE / "static")), name="static")
 
 
 def render(request: Request, name: str, **context):
     context.setdefault("active", name.removesuffix(".html"))
+    from ..maintenance import attention
+    with connection() as conn:
+        state, messages_badge = attention(conn), msgs.badge(conn)
+    context.setdefault("maintenance_count", state["unseen"] + (1 if state["failing_since"] else 0))
+    context.setdefault("messages_badge", messages_badge)
     return templates.TemplateResponse(request, name, context)
 
 
@@ -310,13 +381,19 @@ def _sse(event: str, data) -> str:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n"
 
 
+def _messages() -> dict:
+    with connection() as conn:
+        return msgs.snapshot(conn)
+
+
 def _pulses(since: dict) -> tuple[list, dict]:
     with connection() as conn:
         return live.pulses_since(conn, since)
 
 
 @app.get("/api/stream")
-async def api_stream(request: Request):
+async def api_stream(request: Request, only: str = ""):
+    messages_only = only == "messages"  # the chat page needs no state, graph or pulses
     async def wait_for_next_update() -> bool:
         """Wait in short slices so server shutdown does not wait for an SSE client."""
         remaining = STREAM_EVERY_S
@@ -329,31 +406,48 @@ async def api_stream(request: Request):
             remaining -= time.monotonic() - started
         return not _shutdown_event.is_set() and not await request.is_disconnected()
 
+    async def feed_or_none():
+        try:
+            return await asyncio.to_thread(_messages)
+        except Exception:  # fix(2026-10-28): a messages failure must not take state and pulses (or the stream) down with it
+            log.exception("messages update failed")
+            return None
+
     async def events():
-        snapshot = await asyncio.to_thread(_cache.get)
-        since = dict(snapshot["cursor"])  # no replay of history: pulses start from now
-        ado_cursor = _ado_pulses.since(0)[1]
-        sent_sig = snapshot["graph_sig"]
-        yield "retry: 3000\n\n" + _sse("state", snapshot)
+        sent_sig = since = ado_cursor = None
+        if not messages_only:
+            snapshot = await asyncio.to_thread(_cache.get)
+            since = dict(snapshot["cursor"])  # no replay of history: pulses start from now
+            ado_cursor = _ado_pulses.since(0)[1]
+            sent_sig = snapshot["graph_sig"]
+        sent_messages = await feed_or_none()
+        yield "retry: 3000\n\n" + ("" if messages_only else _sse("state", snapshot)) + (_sse("messages", sent_messages) if sent_messages else "")
         while not _shutdown_event.is_set() and not await request.is_disconnected():
             if not await wait_for_next_update():
                 return
-            try:
-                pulses, since = await asyncio.to_thread(_pulses, since)
-                snapshot = await asyncio.to_thread(_cache.get)
-                ado_pulses, ado_cursor = _ado_pulses.since(ado_cursor)
-            except Exception:
-                log.exception("stream update failed")
-                yield ": error\n\n"
-                continue
-            if pulses or ado_pulses:
-                yield _sse("pulse", pulses + ado_pulses)
-            # Diff-lite: the graph (the bulk of the payload) is only re-sent when its nodes change.
-            body = dict(snapshot)
-            if snapshot["graph_sig"] == sent_sig:
-                body.pop("graph")
-            sent_sig = snapshot["graph_sig"]
-            yield _sse("state", body)
+            if not messages_only:
+                try:
+                    pulses, since = await asyncio.to_thread(_pulses, since)
+                    snapshot = await asyncio.to_thread(_cache.get)
+                    ado_pulses, ado_cursor = _ado_pulses.since(ado_cursor)
+                except Exception:
+                    log.exception("stream update failed")
+                    yield ": error\n\n"
+                else:
+                    if pulses or ado_pulses:
+                        yield _sse("pulse", pulses + ado_pulses)
+                    # Diff-lite: the graph (the bulk of the payload) is only re-sent when its nodes change.
+                    body = dict(snapshot)
+                    if snapshot["graph_sig"] == sent_sig:
+                        body.pop("graph")
+                    sent_sig = snapshot["graph_sig"]
+                    yield _sse("state", body)
+            feed = await feed_or_none()
+            if feed is not None and feed != sent_messages:
+                sent_messages = feed
+                yield _sse("messages", feed)
+            elif messages_only:
+                yield ": keepalive\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -402,8 +496,8 @@ def overview(request: Request):
       SUM(input_tokens+output_tokens+cache_read_tokens+cache_write_tokens) tokens
       FROM usage_events GROUP BY project ORDER BY tokens DESC LIMIT 10""")
     with connection() as conn:
-        limits = live.limits(conn)
-    return render(request, "overview.html", totals=totals, daily=daily, projects=projects, limits=limits)
+        limits, tokens = live.limits(conn), live.tokens(conn)
+    return render(request, "overview.html", totals=totals, daily=daily, projects=projects, limits=limits, tokens=tokens)
 
 
 @app.get("/projects")
@@ -517,3 +611,164 @@ def audit(request: Request):
     with connection() as conn:
         rows = audit_memories(conn)
     return render(request, "audit.html", rows=rows)
+
+
+@app.get("/maintenance")
+def maintenance(request: Request):
+    from ..maintenance import OPEN_FLAG_SQL, attention
+    with connection() as conn:
+        failing = attention(conn)["failing_since"]
+        runs = [dict(row) for row in conn.execute("SELECT * FROM maintenance_runs ORDER BY id DESC LIMIT 50")]
+        changes = [dict(row) for row in conn.execute(f"""SELECT c.*, r.status run_status, ({OPEN_FLAG_SQL}) open_flag
+            FROM maintenance_changes c LEFT JOIN maintenance_runs r ON r.id=c.run_id WHERE c.blocked_by IS NOT 'no_change' ORDER BY c.id DESC LIMIT 300""")]
+        # Rendering the page is "seeing" it: the nav badge only counts what arrived since.
+        conn.execute("UPDATE maintenance_changes SET seen_at=? WHERE seen_at IS NULL", (now(),))
+    for change in changes:
+        try: change["evidence_items"] = json.loads(change["evidence"])
+        except (TypeError, ValueError): change["evidence_items"] = None
+        if not isinstance(change["evidence_items"], list):  # fix(2026-10-28): say so instead of showing "no evidence"
+            change["evidence_items"] = [{"ref": "corrupt evidence record", "result": "the stored evidence could not be read"}]
+    return render(request, "maintenance.html", runs=runs, changes=changes, failing=failing, notice=request.query_params.get("notice"))
+
+
+@app.post("/maintenance/cleanup")
+def maintenance_cleanup():
+    from ..maintenance import cleanup
+    result = cleanup()
+    notice = result.get("line") or ("cleanup is already running" if result["status"] == "locked" else "cleanup finished")
+    return RedirectResponse("/maintenance?notice=" + quote(notice), 303)
+
+
+@app.post("/maintenance/{change_id}/revert")
+def maintenance_revert(change_id: int):
+    from ..maintenance import revert
+    try:
+        if not revert(change_id): raise HTTPException(404, "change cannot be reverted")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return RedirectResponse("/maintenance", 303)
+
+
+@app.post("/maintenance/{change_id}/dismiss")
+def maintenance_dismiss(change_id: int):
+    from ..maintenance import dismiss
+    if not dismiss(change_id): raise HTTPException(404, "only an open flag can be dismissed")
+    return RedirectResponse("/maintenance", 303)
+
+
+# ---------------------------------------------------------------- messages
+
+@app.get("/api/messages")
+def api_messages():
+    return _messages()
+
+
+@app.get("/api/dispatch")
+def api_dispatch():
+    from ..dispatch import config
+    cfg = config()
+    with connection() as conn:
+        jobs = [dict(row) for row in conn.execute("SELECT * FROM message_jobs ORDER BY id DESC LIMIT 20")]
+    return {"enabled": cfg["enabled"], "error": cfg.get("error"), "jobs": jobs}
+
+
+def _chat_filters(project: str, agent: str, kind: str, status: str, question: str) -> dict:
+    return {"project": project, "agent": agent, "kind": kind if kind in msgs.KINDS else "",
+            "status": status if status in ("open", "answered", "closed") else "", "question": bool(question)}
+
+
+@app.get("/messages")
+def messages_page(request: Request, chat: str = "", project: str = "", agent: str = "", kind: str = "", status: str = "", question: str = ""):
+    """WhatsApp-style chats: the list on the left, the open chat on the right (stacked on narrow screens)."""
+    from ..dispatch import config as dispatch_config
+    filters = _chat_filters(project, agent, kind, status, question)
+    with connection() as conn:
+        rows, facets = msgs.chats(conn, **filters), msgs.facets(conn)
+        current = msgs.chat(conn, chat) if chat else None
+        if chat and not current: raise HTTPException(404, "chat not found")
+        if current: msgs.mark_chat_read(conn, current)  # opening a chat is reading it
+    if current:
+        for row in rows:
+            if row["key"] == current["key"]: row["unread"] = 0
+    return render(request, "messages.html", active="messages", chats=rows, chat=current, facets=facets, filters=filters, kinds=msgs.KINDS,
+                  dispatch=dispatch_config())
+
+
+@app.get("/api/chats")
+def api_chats(project: str = "", agent: str = "", kind: str = "", status: str = "", question: str = ""):
+    with connection() as conn:
+        return msgs.chats(conn, **_chat_filters(project, agent, kind, status, question))
+
+
+@app.get("/api/chat")
+def api_chat(key: str, read: int = 0):
+    with connection() as conn:
+        current = msgs.chat(conn, key)
+        if not current: raise HTTPException(404, "chat not found")
+        if read: msgs.mark_chat_read(conn, current)  # the open chat page reads what arrives live
+    return current
+
+
+@app.post("/messages/chat/send")
+def chat_send(request: Request, key: str = Form(...), body: str = Form(...)):
+    with connection() as conn:
+        try:
+            message_id = msgs.chat_post(conn, key, body)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    if "application/json" in request.headers.get("accept", ""):
+        return {"id": message_id}
+    return RedirectResponse("/messages?chat=" + quote(key, safe=""), 303)
+
+
+@app.get("/messages/thread/{thread_id}")
+def message_thread_page(request: Request, thread_id: int):
+    with connection() as conn:
+        items = msgs.thread(conn, thread_id)
+        if not items: raise HTTPException(404, "thread not found")
+        agents = {aid: msgs.subagent(conn, aid) for aid in dict.fromkeys(m["agent_id"] for m in items if m["agent_id"])}
+        # Opening a thread is reading it: unread and badge counts only cover what the user has not seen.
+        msgs.mark_read(conn, [m["id"] for m in items], msgs.USER)
+        chat_key = msgs.chat_keys(conn, msgs._roots(conn, [thread_id])).get(thread_id)
+    return render(request, "message_thread.html", active="messages", items=items, root=items[0], agents=agents, chat_key=chat_key)
+
+
+@app.post("/messages/thread/{thread_id}/reply")
+def message_reply(thread_id: int, body: str = Form(...)):
+    with connection() as conn:
+        items = msgs.thread(conn, thread_id)
+        if not items: raise HTTPException(404, "thread not found")
+        # Answer the newest open question from an agent, otherwise continue after the newest message.
+        target = next((m for m in reversed(items) if m["kind"] == "question" and m["status"] == "open" and m["sender_kind"] != "user"), items[-1])
+        try:
+            message_id = msgs.post(conn, body, sender=msgs.USER, sender_kind="user", to=target["sender"] if target["sender_kind"] != "user" else "*",
+                                   reply_to=target["id"])
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        msgs.mark_read(conn, [message_id], msgs.USER)
+        from ..dispatch import enqueue
+        chat_key = msgs.chat_keys(conn, msgs._roots(conn, [items[0]["thread_id"]])).get(items[0]["thread_id"])
+        enqueue(conn, message_id, chat_key or f"t:{items[0]['thread_id']}")
+    return RedirectResponse(f"/messages/thread/{thread_id}", 303)
+
+
+@app.post("/messages/thread/{thread_id}/close")
+def message_close(thread_id: int):
+    with connection() as conn: msgs.close(conn, thread_id)
+    return RedirectResponse(f"/messages/thread/{thread_id}", 303)
+
+
+@app.post("/messages/thread/{thread_id}/reopen")
+def message_reopen(thread_id: int):
+    with connection() as conn: msgs.reopen(conn, thread_id)
+    return RedirectResponse(f"/messages/thread/{thread_id}", 303)
+
+
+@app.get("/messages/agent/{agent_id}")
+def subagent_page(request: Request, agent_id: str):
+    with connection() as conn:
+        agent = msgs.subagent(conn, agent_id)
+    if not agent: raise HTTPException(404, "subagent not found")
+    return render(request, "subagent.html", active="messages", agent=agent)

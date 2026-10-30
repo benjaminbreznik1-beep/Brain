@@ -51,6 +51,43 @@ Memory content is capped at 2,000 characters by default (`DEVMEM_MAX_CONTENT` ov
 
 Before any future schema upgrade of an existing database, devmem creates a consistent SQLite snapshot in `~/.devmem/backups/` (override with `DEVMEM_BACKUP_DIR`).
 
+## Automatic maintenance
+
+`devmem maintain [--project DIR] [--dry-run] [--limit N]` checks stale notes and todos against local git/filesystem evidence and can update, merge, or supersede them. `--dry-run` lists and records proposals but does not alter memories, links or history. The command exits 1 when the run fails. Maintenance normally uses `codex exec` (or `claude -p` if configured), never API keys. Its optional `~/.devmem/maintain.json` config (override with `DEVMEM_MAINTAIN`) defaults to:
+
+`devmem maintenance-cleanup [--dry-run]` needs no model: it closes resolved flags and removes old maintenance bookkeeping. The Maintenance page has the same **Clean up** action; it never changes memories.
+
+```json
+{"enabled": false, "engine": "codex", "model": null, "full_every_hours": 20, "max_changes": 15, "max_shrink": 0.5, "use_transcripts": true, "protected_kinds": ["preference", "decision"]}
+```
+
+A missing file means these disabled defaults; set `"enabled": true` to opt in. An unreadable file, an unknown key or a wrongly typed value turns maintenance off and records an error run, so a typo can never silently re-enable it or drop a protection. `protected_kinds` can add kinds but never remove `preference` or `decision`.
+
+The panel's `/maintenance` page shows runs (with errors), evidence, diffs, flags, and one-click revert; its nav badge shows unseen changes and flags, and failing runs also add a line to the session briefing. Automatic changes are guarded by mechanical/transcript evidence, a second verifier pass, loss-token checks, content/secret checks, rate limits, and a recent-edit grace period. Preferences, decisions, and `no-auto` tagged memories are flag-only, including their review dates. Background runs (panel start, `SessionStart`, `SessionEnd`) write their output to `~/.devmem/maintain.log` (`DEVMEM_MAINTAIN_LOG`); only one run happens at a time (`~/.devmem/maintain.lock`, `DEVMEM_MAINTAIN_LOCK`). Engine sessions run with `DEVMEM_MAINTAIN_CHILD=1`, and devmem's hooks do nothing inside them.
+
+To also maintain a project's memories when a Claude session ends, add this hook by hand (it is not installed automatically):
+
+```json
+{"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "devmem maintain --session-end --hook"}]}]}}
+```
+
+## Messages between agents
+
+Agents talk through the brain with five MCP tools: `message_post(body, to='*', subject, kind, reply_to, sender)` (kinds: message, question, finding, event; `to` is an agent name, `*`, `#channel` or `user`), `message_inbox(unread_only, limit, reader)` (messages to you, to `*`, or to channels you posted in; an unread check marks them read, `unread_only=False` re-reads without marking), `message_thread`, `message_wait(thread_id, timeout_s<=60, after_id, reader)` (returns messages newer than `after_id` as soon as one lands, marks returned messages read for its reader, and carries `last_id` to pass as the next `after_id`; without `after_id` it starts after your own newest message in the thread, else after its root, so an early reply is never missed) and `message_close`. Subagents share their parent's MCP connection, so they pass their own name as `sender`/`reader`; the panel labels such senders "self-declared". Bodies are capped at 8,000 characters, anything matching the maintenance secret patterns is rejected and never stored, except that a derived subject is redacted rather than rejected; each sender may post 30 messages a minute, and closed threads older than 30 days are deleted (by maintenance runs, also when maintenance is disabled, and hourly by the panel), together with the timelines of their subagents.
+
+The log scanner also follows Claude Code subagents (`<session>/subagents/agent-<id>.jsonl` and `.meta.json`) and Codex rollouts (`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`): type, task, one line per tool call (tool name plus a path, patch file or the first 80 characters of a command, with secrets redacted; never tool results or thinking), the assistant's remarks between tool calls (first 500 characters each, redacted), status and the final report. Codex reasoning and tool outputs are never stored. Devmem's own dispatch and maintenance prompts carry a local sentinel, so their child runs are not made into agent timelines and their Claude sessions do not affect message-chat attachment. A Codex task carrying a handoff id joins the newest Claude chat only when that id is visibly created or passed to Bash in exactly that Claude log; otherwise it has its own `Codex · project · task` chat. An agent is finished when its sidecar says so or its last record ends the run (a `SubagentHandback` call or its result, an `end_turn` text, or Codex `task_complete`); stale after 10 quiet minutes; stopped after 2 quiet hours. Every spawn and every end (report, or "(no report: agent stopped)") becomes an `event` in the `#agents` channel, one thread per agent, closed when the agent ends. A report is never taken from a log whose last line is still being written, but after two hours an unfinished tail is recorded as stopped. One unreadable log or sidecar is logged and skipped; it never stops the rest of the ingest pass.
+
+On the Brain tab, the Messages panel (under the graph) shows the latest 20 items live, and a Claude session in the Agents panel lists its subagents. The token figures moved to Overview. The `/messages` tab is a WhatsApp-style chat view: a chat list on the left (one row per Claude Code session, per standalone `message_post` thread and per `#channel`, newest first, with preview, time and unread count; filters in a dropdown) and the conversation on the right. In a session chat the parent's task to each subagent is a bubble from Claude addressed `@<agent type>`, the subagent's remarks and its report (expandable) follow, tool calls collapse into small grey lines, and your own messages sit on the right. New bubbles arrive live; the box at the bottom posts as `user` to the agent with an open question, else to the last agent that spoke, which reaches an agent waiting in `message_wait`. Clicking an agent's name opens its own page (task, remarks, tool timeline, report); single threads keep their page with close/reopen. All panel POSTs from another origin are refused (Origin / Sec-Fetch-Site check). The nav badge counts unread questions plus open threads addressed to `user`. Suggested agent instructions are in `docs/agent-messages-instructions.md`.
+
+Automatic replies to new panel messages are optional: set `enabled` in
+`~/.devmem/dispatch.json` and restart the panel after running the tests.
+Routing uses fast explicit requests (`@Codex`, `Claude, ...`, or
+`please ask Codex to ...`), otherwise retaining the current agent. There is
+no routing model call. A quota error or unresponsive runner gets one
+fallback to the other agent, with the handoff and answer shown in the chat.
+See [message-dispatch.md](docs/message-dispatch.md) for configuration and
+delivery behavior.
+
 ## Reminders
 
 To receive lightweight reminders after relevant shell commands, add this to Claude Code's `settings.json` by hand:

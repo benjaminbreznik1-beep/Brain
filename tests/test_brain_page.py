@@ -25,3 +25,10 @@ def test_wall_mode_class_does_not_collide_with_grid():
     assert "body.wall " not in css and "body.wall." not in css
     assert '"wall-mode"' in js and '"Escape"' in js
     assert '.toggle("wall",' not in js and '.add("wall")' not in js
+
+
+def test_glow_is_off_unless_the_user_turned_it_on():
+    js3d = (STATIC / "brain3d.js").read_text()
+    js = (STATIC / "brain.js").read_text()
+    assert 'localStorage.getItem("devmem.bloom") === "1"' in js3d and 'localStorage.getItem("devmem.bloom") === "1"' in js
+    assert '"devmem.glow"' not in js3d and '"devmem.glow"' not in js

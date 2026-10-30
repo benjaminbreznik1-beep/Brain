@@ -14,15 +14,15 @@
   <button>Search</button>
 </form>
 
-{% if embedder_status %}<p class="muted">semantic search unavailable: {{ embedder_status.last_error }} — keyword results only</p>{% endif %}
+{% if embedder_status %}<p class="muted search-note">Semantic search is unavailable ({{ embedder_status.last_error }}). Showing keyword results only.</p>{% endif %}
 
 <div class="pill-row">
   {% for c in counts %}
-  <span class="badge kind-{{ c.kind }}">{{ c.kind }} · {{ c.count }}</span>
+  <span class="badge kind-{{ c.kind }}">{{ c.kind }} <span class="count">{{ c.count }}</span></span>
   {% endfor %}
 </div>
 
-<details class="card">
+<details class="card create-card">
   <summary>Create memory</summary>
   <form method="post">
     <div class="form-row">
@@ -40,13 +40,13 @@
 </details>
 
 {% for x in rows %}
-<details class="card">
+<details class="card memory-row">
   <summary>
     <span class="badge kind-{{ x.kind }}">{{ x.kind }}</span>
     {% if x.match %}<span class="badge">{{ x.match }}</span>{% endif %}
     {% if x.stale %}<span class="badge">stale</span>{% endif %}
-    {{ x.title }}
-    <span class="muted"> · {{ x.project or 'global' }} · <time data-rel datetime="{{ x.updated_at }}">{{ x.updated_at }}</time></span>
+    <span class="m-title">{{ x.title }}</span>
+    <span class="m-meta"><span class="mono">{{ x.project or 'global' }}</span><time data-rel datetime="{{ x.updated_at }}">{{ x.updated_at }}</time></span>
   </summary>
   <form method="post" action="/memory/{{ x.id }}">
     <div class="form-row">

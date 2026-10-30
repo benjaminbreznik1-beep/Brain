@@ -15,12 +15,12 @@
       <ul class="ado-list">
       {% for pr in items %}
         <li>
-          <a href="{{ pr.url }}" target="_blank" rel="noopener">#{{ pr.id }} · {{ pr.title }}</a>
-          <span class="muted">{{ pr.repo }} · created {{ pr.created_date or 'unknown' }}</span>
+          <a href="{{ pr.url }}" target="_blank" rel="noopener"><span class="mono">#{{ pr.id }}</span> {{ pr.title }}</a>
+          <span class="muted meta"><span class="mono">{{ pr.repo }}</span><span>created {{ (pr.created_date | when) or 'unknown' }}</span></span>
           <span class="ado-reviewers">
           {% for reviewer in pr.reviewers %}{{ reviewer.name }} <b>({{ reviewer.vote }})</b>{% if not loop.last %}, {% endif %}{% endfor %}
           </span>
-          {% if pr.pending_reviewers is defined %}<span class="muted">Pending: {{ pr.pending_reviewers|join(', ') if pr.pending_reviewers else 'no named pending reviewers' }} · {{ pr.age_label }}</span>{% endif %}
+          {% if pr.pending_reviewers is defined %}<span class="muted meta"><span>Pending: {{ pr.pending_reviewers|join(', ') if pr.pending_reviewers else 'no named pending reviewers' }}</span><span>{{ pr.age_label }}</span></span>{% endif %}
         </li>
       {% endfor %}
       </ul>
@@ -33,7 +33,7 @@
       <p class="muted">{{ snapshot.project_active_count }} active PRs in the configured project</p>
     </div>
     <div class="ado-refresh">
-      <span class="muted">Last refresh: {{ snapshot.refreshed_at or 'not yet' }}</span>
+      <span class="muted">Last refresh: {{ (snapshot.refreshed_at | when) or 'not yet' }}</span>
       {% if snapshot.stale %}<span class="badge ado-stale">stale</span>{% endif %}
       {% if snapshot.error %}<span class="ado-error">{{ snapshot.error }}</span>{% endif %}
       <form action="/ado/refresh" method="post"><button type="submit">Refresh</button></form>
@@ -54,7 +54,7 @@
   {% if snapshot.open_tasks_by_state %}
     {% for state, tasks in snapshot.open_tasks_by_state.items() %}
       <section class="card ado-tasks"><h3>{{ state }} <span class="hint">{{ tasks|length }}</span></h3>
-        <ul class="ado-list">{% for task in tasks %}<li><a href="{{ task.url }}" target="_blank" rel="noopener">#{{ task.id }} · {{ task.title }}</a><span class="muted">{{ task.type }} · changed {{ task.changed_date or 'unknown' }}</span></li>{% endfor %}</ul>
+        <ul class="ado-list">{% for task in tasks %}<li><a href="{{ task.url }}" target="_blank" rel="noopener"><span class="mono">#{{ task.id }}</span> {{ task.title }}</a><span class="muted meta"><span>{{ task.type }}</span><span>changed {{ (task.changed_date | when) or 'unknown' }}</span></span></li>{% endfor %}</ul>
       </section>
     {% endfor %}
   {% else %}<p class="muted">No open work items assigned to you.</p>{% endif %}
