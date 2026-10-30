@@ -15,6 +15,7 @@ from typing import Iterator
 import numpy as np
 
 from .embed import EMBEDDING_DIM, EMBEDDING_MODEL, get_embedder
+from .projects import project_for_cwd
 
 SCHEMA_VERSION = 12
 DEFAULT_MAX_CONTENT = 2000
@@ -827,18 +828,6 @@ def hybrid_search(conn: sqlite3.Connection, query: str, *, where_sql: str, param
         row["stale"] = is_stale(row.get("review_after"))
         out.append(row)
     return out
-
-
-@lru_cache(maxsize=1024)
-def project_for_cwd(cwd: str | None) -> str | None:
-    """Return git root for cwd, without invoking git; walk for a .git marker."""
-    if not cwd:
-        return None
-    current = Path(cwd).expanduser().resolve()
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            return str(candidate)
-    return str(current)
 
 
 def context_text(conn: sqlite3.Connection, project: str | None) -> str:

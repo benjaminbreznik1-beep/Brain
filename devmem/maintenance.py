@@ -352,7 +352,7 @@ def _evidence(memory: dict) -> tuple[list[dict], list[dict]]:
 # ---------------------------------------------------------------- guardrails
 
 def _protected(memory: dict, cfg: dict) -> bool:
-    return memory["kind"] in ALWAYS_PROTECTED | set(cfg["protected_kinds"]) or "no-auto" in re.split(r"[\s,]+", (memory["tags"] or "").lower())
+    return memory["kind"] in ALWAYS_PROTECTED | set(cfg["protected_kinds"]) or "no-auto" in re.split(r"[\s,]+", (memory["tags"] or "").lower()) or any(line.startswith("GUARD:") for line in memory.get("content", "").splitlines())
 def _superseded(conn, memory_id: int) -> bool: return bool(conn.execute("SELECT 1 FROM memory_links WHERE to_id=? AND type='supersedes'", (memory_id,)).fetchone())
 
 

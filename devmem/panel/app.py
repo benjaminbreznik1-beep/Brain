@@ -5,6 +5,7 @@ import copy
 import json
 import logging
 import re
+import sqlite3
 import secrets
 import threading
 import time
@@ -21,6 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import messages as msgs
 from ..db import audit_memories, connection, ensure_embeddings, fts_query, hybrid_search, is_stale, now, validate_content, validate_review_after
+from ..guard import rules_data
 from ..embed import get_embedder
 from ..ingest.runner import ingest_all
 from ..ado import AdoClient, AdoError, empty_snapshot
@@ -473,7 +475,11 @@ async def api_stream(request: Request, only: str = ""):
 
 @app.get("/")
 def brain(request: Request):
-    return render(request, "brain.html", active="brain")
+    try:
+        with connection() as conn: rules = rules_data(conn, None)
+    except sqlite3.Error:
+        rules = {"rules": [], "invalid": []}
+    return render(request, "brain.html", active="brain", rules=rules)
 
 
 @app.get("/ado")

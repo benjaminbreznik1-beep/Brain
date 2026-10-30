@@ -7,10 +7,8 @@ import re
 import signal
 import sys
 import subprocess
-from pathlib import Path
-
-from .db import audit_memories, context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, now, project_for_cwd, readonly_connection
-from .embed import get_embedder
+from .hook_log import _log, _maintain_log, _open_maintain_log
+from .projects import project_for_cwd
 
 
 _NO_CONTEXT = "No saved project context."
@@ -30,24 +28,6 @@ def _hook_cwd() -> str:
         return cwd if isinstance(cwd, str) else os.getcwd()
     except Exception:
         return os.getcwd()
-
-
-def _maintain_log() -> Path:
-    return Path(os.environ.get("DEVMEM_MAINTAIN_LOG", "~/.devmem/maintain.log")).expanduser()
-
-
-def _open_maintain_log():
-    """Append handle for detached maintenance output; rotated at 1 MB so it cannot grow without bound."""
-    path = _maintain_log(); path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file() and path.stat().st_size > 1_000_000: path.replace(path.with_name(path.name + ".1"))
-    return open(path, "ab")
-
-
-def _log(message: str) -> None:
-    try:
-        with _open_maintain_log() as log: log.write(f"{now()} {message}\n".encode())
-    except OSError:
-        pass
 
 
 def _spawn_maintain(*args: str) -> None:
@@ -107,6 +87,7 @@ def _print_proposals(changes: list[dict]) -> None:
 
 
 def _context_for_cwd(cwd: str) -> str:
+    from .db import context_text, db_path, readonly_connection
     if not db_path().is_file():
         return _NO_CONTEXT
     with readonly_connection() as conn:
@@ -167,6 +148,12 @@ def main() -> None:
     context.add_argument("--hook", action="store_true")
     remind = sub.add_parser("remind")
     remind.add_argument("--hook", action="store_true")
+    for name in ("guard", "rules"):
+        guard = sub.add_parser(name)
+        guard.add_argument("--hook", action="store_true")
+        guard.add_argument("--cwd")
+        guard.add_argument("--codex", action="store_true")
+        guard.add_argument("--check")
     maintain = sub.add_parser("maintain")
     maintain.add_argument("--project")
     maintain.add_argument("--dry-run", action="store_true")
@@ -186,11 +173,42 @@ def main() -> None:
     for name in ("allow", "deny"):
         command = git_sub.add_parser(name); command.add_argument("project")
     args = parser.parse_args()
-    if args.command == "mcp":
+    if args.command in ("guard", "rules"):
+        from . import guard as rules_guard
+        if args.hook:
+            rules_guard.hook(); return
+        try:
+            if args.check:
+                payload = json.loads(args.check)
+                if not isinstance(payload, dict): raise ValueError("--check must be a JSON object")
+                scope = payload.get("cwd") if isinstance(payload.get("cwd"), str) else args.cwd or os.getcwd()
+                action, matched = rules_guard.evaluate(rules_guard.readonly_rules(scope), payload)
+                print(action + (" " + ",".join(str(rule["id"]) for rule in matched) if matched else ""))
+                return
+            data = rules_guard.readonly_rules(args.cwd or os.getcwd())
+            if args.codex:
+                for rule in data["rules"]:
+                    deny = rule["action"] == "deny"
+                    tool = "any tool" if rule["tool"] == "*" else rule["tool"]
+                    if "command" in rule: text = f"{'run' if deny else 'running'} {tool} commands matching `{rule['command']}`"
+                    elif "path" in rule: text = f"{'use' if deny else 'using'} {tool} on paths matching `{rule['path']}`"
+                    else: text = f"{'use' if deny else 'using'} {tool}"
+                    print(f"- {'NEVER' if deny else 'ASK the user before'} {text} (devmem #{rule['id']}: {rule['title']})")
+            else:
+                for rule in data["rules"]:
+                    target = rule.get("command") or rule.get("path") or ""
+                    print(f"#{rule['id']} {rule['tool']} {rule['action']} {target} — {rule['title']}")
+                for item in data["invalid"]: print(f"#{item['id']} invalid GUARD: {item['reason']}")
+        except Exception as exc:
+            print(f"devmem rules: {exc}", file=sys.stderr)
+            raise SystemExit(1)
+    elif args.command == "mcp":
         from .mcp_server import run; run()
     elif args.command == "ingest":
         from .ingest.runner import ingest_all; print(f"Ingested {ingest_all()} new usage events.")
     elif args.command == "embed":
+        from .db import connection, ensure_embeddings
+        from .embed import get_embedder
         total = 0
         with connection() as conn:
             while True:
@@ -204,6 +222,7 @@ def main() -> None:
                         raise SystemExit(1)
                     break
     elif args.command == "audit":
+        from .db import audit_memories, connection
         with connection() as conn:
             rows = audit_memories(conn)
         if not rows:
@@ -225,6 +244,7 @@ def main() -> None:
         PanelServer(config).run()
     elif args.command == "context":
         try:
+            from .db import db_path
             if args.hook and _maintain_child():
                 return
             if not db_path().is_file():
@@ -259,6 +279,7 @@ def main() -> None:
             result = run(trigger, project=project, dry_run=args.dry_run, limit=args.limit,
                          transcript_path=args.transcript if args.session_end else None)
         except BaseException as exc:
+            from .db import now
             print(f"{now()} devmem maintain failed: {type(exc).__name__}: {exc}"[:500], file=sys.stderr)
             raise SystemExit(1)
         _print_proposals(result.pop("changes", []))
@@ -293,6 +314,7 @@ def main() -> None:
             result = git_sync.sync(dry_run=args.dry_run); print(json.dumps(result, separators=(",", ":")))
             if result["errors"]: raise SystemExit(1)
     else:
+        from .db import connection, fts_query, hybrid_search
         if not fts_query(args.q): return
         with connection() as conn:
             rows = hybrid_search(conn, args.q, where_sql="1=1", limit=args.limit)

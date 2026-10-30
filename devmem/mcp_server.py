@@ -17,6 +17,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 from mcp.server.fastmcp import Context, FastMCP
 
 from . import messages
+from .guard import rules_data, warnings as guard_warnings
 
 log = logging.getLogger("devmem.mcp")
 from .db import connection, context_text, embed_memory, hybrid_search, is_stale, not_superseded_sql, now, project_for_cwd, restore_memory, save_memory, similar_memories, update_memory, validate_content, validate_review_after
@@ -215,6 +216,7 @@ def memory_save(content: str, title: str | None = None, kind: str = "note", tags
         with connection() as conn:
             memory_id = save_memory(conn, content=content, title=title, kind=kind, tags=tags or "", project=selected, pinned=pinned, review_after=review, source_agent=_client_name or "mcp-client")
             result = {"id": memory_id}
+            if warnings := guard_warnings(content): result["warnings"] = warnings
             conn.commit()  # loading the embedding model can take seconds; do not hold the write lock meanwhile
             if os.environ.get("DEVMEM_EMBED") != "0":
                 try:
@@ -289,7 +291,9 @@ def memory_update(id: int, content: str | None = None, title: str | None = None,
     def work():
         with connection() as conn:
             update_memory(conn, id, content=content, title=title, tags=tags, kind=kind, pinned=pinned, review_after=review_after)
-        return _get(id) or {"id": id, "missing": True}
+        result = _get(id) or {"id": id, "missing": True}
+        if content is not None and (warnings := guard_warnings(content)): result["warnings"] = warnings
+        return result
     return _call("memory_update", {"id":id, "pinned":pinned, "review_after":review_after}, work, ctx)
 
 
@@ -328,6 +332,13 @@ def memory_list(limit: int = 20, kind: str | None = None, scope: str = "project"
             return [{**dict(r), "stale": is_stale(r["review_after"])} for r in conn.execute(f"""SELECT id,title,kind,project,tags,pinned,review_after,updated_at FROM memories
                 WHERE {where} AND {not_superseded_sql('memories')} ORDER BY updated_at DESC LIMIT ?""", (*params, max(1,min(limit,100)))).fetchall()]
     return _call("memory_list", {"limit":limit,"kind":kind,"scope":scope}, work, ctx)
+
+
+@mcp.tool(description="List binding devmem guard rules and invalid GUARD lines for this cwd. Codex task specifications should include the output of `devmem rules --codex`.")
+def rules_list(cwd: str | None = None, ctx: Context | None = None) -> dict:
+    def work():
+        with connection() as conn: return rules_data(conn, cwd or os.getcwd())
+    return _call("rules_list", {"cwd": cwd}, work, ctx)
 
 
 @mcp.tool(description="Get a compact briefing before non-trivial work: all pinned memories, recent project context, and global preferences.")
