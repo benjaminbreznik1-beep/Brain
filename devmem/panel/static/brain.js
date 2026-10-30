@@ -210,7 +210,7 @@
       // claude and claude-subagent rows share a session id: its subagents are listed once, under the first row.
       var children = s.agent.indexOf("claude") === 0 && subs[s.session_id] && !shownSubs[s.session_id] ? subs[s.session_id] : null;
       if (children) shownSubs[s.session_id] = 1;
-      var connected = clients.some(function (c) { return c.family === (s.agent.indexOf("codex") >= 0 ? "codex" : "claude") && c.project === s.project; });
+      var connected = clients.some(function (c) { return !c.remote && c.family === (s.agent.indexOf("codex") >= 0 ? "codex" : "claude") && c.project === s.project; });
       var last = s.last_tool ? '<span class="tool">' + esc(s.last_tool) + "</span> " + esc(s.last_summary || "") :
         (s.tokens_10m ? U.fmtTokens(s.tokens_10m) + " tokens in 10 min" : "");
       return '<li class="agent' + (s.age_s !== null && s.age_s < 120 ? " active" : "") + '" style="--c:' + agentColor(s.agent) + '">' +
@@ -220,7 +220,7 @@
     });
     clients.forEach(function (c) {
       var shown = sessions.some(function (s) { return (s.agent.indexOf("codex") >= 0 ? "codex" : "claude") === c.family && s.project === c.project; });
-      if (shown) return;
+      if (shown && !c.remote) return;
       rows.push('<li class="agent" style="--c:' + agentColor(c.family) + '"><span class="pip"></span>' +
         '<span class="a-main"><b>' + esc(c.client_name || c.family) + "</b> · " + esc(c.project_name) + '</span><span class="a-age">connected</span>' +
         '<span class="a-last">' + (c.last_tool ? 'memory: <span class="tool">' + esc(c.last_tool) + "</span>" : "idle") + "</span></li>");

@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import messages as msgs
+from .. import remote
 from ..db import audit_memories, connection, ensure_embeddings, fts_query, hybrid_search, is_stale, now, validate_content, validate_review_after
 from ..embed import get_embedder
 from ..ingest.runner import ingest_all
@@ -343,8 +344,20 @@ async def lifespan(app: FastAPI):
         dispatch_thread.join(timeout=5)
 
 
+class PanelHosts(TrustedHostMiddleware):
+    """Loopback plus remote.json panel_hosts (Tailscale Serve names), re-read when that file changes; the bind stays 127.0.0.1."""
+    LOCAL = ("127.0.0.1", "localhost")
+
+    def __init__(self, app):
+        super().__init__(app, allowed_hosts=list(self.LOCAL))
+
+    async def __call__(self, scope, receive, send):
+        self.allowed_hosts = [*self.LOCAL, *remote.panel_hosts()]
+        await super().__call__(scope, receive, send)
+
+
 app = FastAPI(title="devmem", lifespan=lifespan)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+app.add_middleware(PanelHosts)
 
 
 @app.middleware("http")
@@ -542,8 +555,23 @@ def agents(request: Request):
         GROUP BY a.id ORDER BY a.last_seen_at DESC""")
     for client in clients:
         client["connected"] = live.client_connected(client)
-    calls = _rows("SELECT t.*,a.client_name FROM tool_calls t JOIN agent_clients a ON a.id=t.client_id ORDER BY t.at DESC LIMIT 100")
+    calls = _rows("SELECT t.*,a.client_name,a.remote_client_id FROM tool_calls t JOIN agent_clients a ON a.id=t.client_id ORDER BY t.at DESC LIMIT 100")
     return render(request, "agents.html", clients=clients, calls=calls)
+
+
+@app.get("/remote")
+def remote_page(request: Request):
+    try: cfg, config_error = remote.load_config(), None
+    except ValueError as exc: cfg, config_error = {}, str(exc)
+    status = {"enabled": bool(cfg.get("enabled")), "public_url": cfg.get("public_url"), "passphrase": bool(cfg.get("passphrase_scrypt")),
+              "running": remote.mcp_http_running(), "error": config_error}
+    return render(request, "remote.html", status=status, clients=remote.clients(), calls=remote.remote_calls(50))
+
+
+@app.post("/remote/revoke/{client_id}")
+def remote_revoke(client_id: str):
+    if not remote.revoke_client(client_id): raise HTTPException(404, "no active client with that id")
+    return RedirectResponse("/remote", 303)
 
 
 @app.get("/memory")

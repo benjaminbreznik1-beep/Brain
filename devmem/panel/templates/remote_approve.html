@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Approve · devmem</title>
+  <style>{{ styles }}
+    .approve { max-width: 34rem; }
+    .approve dl { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-2xs) var(--space-md); margin: 0 0 var(--space-md); font-size: var(--text-sm); }
+    .approve dt { color: var(--color-muted); }
+    .approve dd { margin: 0; overflow-wrap: anywhere; }
+    .approve label { display: block; color: var(--color-muted); font-size: var(--text-sm); margin-bottom: var(--space-2xs); }
+    .approve input[type="password"] { width: 100%; margin-bottom: var(--space-sm); }
+    .approve .error { color: var(--color-error); margin-bottom: var(--space-sm); }
+  </style>
+</head>
+<body>
+  <main class="page approve">
+    <h1>Connect to devmem</h1>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    {% if pending %}
+    <div class="card">
+      <dl>
+        <dt>Client</dt><dd>{{ pending.client_name }}</dd>
+        <dt>Returns to</dt><dd class="mono">{{ redirect_host }}</dd>
+        <dt>Access</dt><dd class="mono">{{ pending.scopes | join(' ') }}</dd>
+      </dl>
+      <form method="post" action="/approve" autocomplete="off">
+        <input type="hidden" name="req" value="{{ request_id }}">
+        <input type="hidden" name="csrf" value="{{ pending.csrf }}">
+        <label for="passphrase">Passphrase</label>
+        <input id="passphrase" name="passphrase" type="password" required autofocus autocomplete="current-password">
+        <button type="submit">Approve</button>
+      </form>
+    </div>
+    <p class="muted">Approving lets this client search, read and save memories and post messages. Update, delete and restore stay local.</p>
+    {% endif %}
+  </main>
+</body>
+</html>

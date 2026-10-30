@@ -153,10 +153,65 @@ def _remind_hook() -> None:
     except Exception as exc:
         print(f"devmem remind: {exc}", file=sys.stderr)
 
+def _ask_passphrase() -> str:
+    """Interactive only (getpass), never an argument, so it cannot land in shell history or ps."""
+    import getpass
+    first = getpass.getpass("New passphrase: ")
+    if not first: raise SystemExit("devmem remote: the passphrase must not be empty")
+    if getpass.getpass("Repeat passphrase: ") != first: raise SystemExit("devmem remote: the passphrases do not match")
+    return first
+
+
+def _remote_command(args) -> None:
+    from . import remote
+    try: cfg = remote.load_config()
+    except ValueError as exc: raise SystemExit(f"devmem remote: {exc}")
+    if args.remote_command == "setup":
+        try: url = remote.normalise_url(args.url)
+        except ValueError as exc: raise SystemExit(f"devmem remote: {exc}")
+        had_passphrase = bool(cfg.get("passphrase_scrypt"))
+        cfg["passphrase_scrypt"] = remote.hash_passphrase(_ask_passphrase())
+        cfg.update(enabled=True, public_url=url)
+        cfg.setdefault("redirect_allowlist", list(remote.DEFAULT_REDIRECTS))
+        hosts = cfg.get("panel_hosts") if isinstance(cfg.get("panel_hosts"), list) else []
+        host = url.removeprefix("https://").split(":", 1)[0]
+        cfg["panel_hosts"] = hosts if host in hosts else [*hosts, host]
+        remote.save_config(cfg)
+        revoked = remote.revoke_all_tokens() if had_passphrase else 0
+        print(f"Remote access enabled for {url} (connector URL {url}/mcp); config in {remote.config_path()}."
+              + (f" Passphrase replaced: {revoked} tokens revoked." if had_passphrase else ""))
+    elif args.remote_command == "passphrase":
+        if remote.setup_problem({**cfg, "passphrase_scrypt": "x"}): raise SystemExit("devmem remote: run `devmem remote setup --url ...` first")
+        cfg["passphrase_scrypt"] = remote.hash_passphrase(_ask_passphrase())
+        remote.save_config(cfg)
+        print(f"Passphrase changed; {remote.revoke_all_tokens()} tokens revoked. Clients must approve again.")
+    elif args.remote_command == "status":
+        print(f"enabled: {bool(cfg.get('enabled'))}  public_url: {cfg.get('public_url') or '-'}  passphrase: {'set' if cfg.get('passphrase_scrypt') else 'not set'}"
+              f"  mcp-http: {'running' if remote.mcp_http_running() else 'not running'}")
+        rows = remote.clients()
+        if not rows: print("No remote clients registered.")
+        for c in rows:
+            state = "revoked" if c["revoked_at"] else "active"
+            print(f"{c['client_id']}\t{c['client_name'] or 'unnamed'}\t{state}\tregistered {c['created_at']}\tlast used {c['last_used_at'] or 'never'}"
+                  f"\taccess {c['access_tokens'] or 0}\trefresh {c['refresh_tokens'] or 0}")
+    elif args.remote_command == "revoke":
+        if args.client_id == "all":
+            print(f"Revoked {remote.revoke_all_clients()} clients.")
+        elif remote.revoke_client(args.client_id):
+            print(f"Revoked {args.client_id}.")
+        else:
+            raise SystemExit(f"devmem remote: no active client {args.client_id}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="devmem")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("mcp")
+    mcp_http = sub.add_parser("mcp-http"); mcp_http.add_argument("--port", type=int, default=8766)
+    remote_cmd = sub.add_parser("remote"); remote_sub = remote_cmd.add_subparsers(dest="remote_command", required=True)
+    remote_sub.add_parser("setup").add_argument("--url", required=True)
+    remote_sub.add_parser("passphrase"); remote_sub.add_parser("status")
+    remote_sub.add_parser("revoke").add_argument("client_id")
     sub.add_parser("ingest")
     sub.add_parser("embed")
     sub.add_parser("audit")
@@ -180,6 +235,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "mcp":
         from .mcp_server import run; run()
+    elif args.command == "mcp-http":
+        from .remote import run; run(args.port)
+    elif args.command == "remote":
+        _remote_command(args)
     elif args.command == "ingest":
         from .ingest.runner import ingest_all; print(f"Ingested {ingest_all()} new usage events.")
     elif args.command == "embed":

@@ -28,9 +28,9 @@ def test_v5_to_v6_makes_snapshot_before_upgrade(tmp_path, monkeypatch):
     monkeypatch.setenv("DEVMEM_BACKUP_DIR", str(backups))
     _v5_database(path)
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 13
     assert migrated.execute("SELECT review_after FROM memories").fetchone()[0] is None
-    backup = next(backups.glob("devmem-before-v12-from-v5-*.db"))
+    backup = next(backups.glob("devmem-before-v13-from-v5-*.db"))
     previous = sqlite3.connect(backup)
     assert previous.execute("SELECT version FROM schema_version").fetchone()[0] == 5
 
@@ -108,7 +108,7 @@ def test_older_database_is_backed_up_before_the_first_upgrade_step(tmp_path, mon
     _migrate_v2(raw); _migrate_v3(raw)
     raw.execute("INSERT INTO memories(project,kind,title,content,created_at,updated_at) VALUES('p','note','Old','body','x','x')"); raw.commit(); raw.close()
     connect(path).close()
-    backup = sqlite3.connect(next(backups.glob("devmem-before-v12-from-v3-*.db")))
+    backup = sqlite3.connect(next(backups.glob("devmem-before-v13-from-v3-*.db")))
     assert backup.execute("SELECT version FROM schema_version").fetchone()[0] == 3
     assert backup.execute("SELECT title FROM memories").fetchone()[0] == "Old"
     connect(path).close()

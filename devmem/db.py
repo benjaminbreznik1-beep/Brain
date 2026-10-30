@@ -16,7 +16,7 @@ import numpy as np
 
 from .embed import EMBEDDING_DIM, EMBEDDING_MODEL, get_embedder
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 DEFAULT_MAX_CONTENT = 2000
 # bge-small-en-v1.5 scores unrelated text ~0.45-0.59 and real matches ~0.65+ (measured on ~40 memories, 2026-10).
 MIN_COSINE = 0.6
@@ -189,6 +189,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         _migrate_v11(conn)
     if version < 12:
         _migrate_v12(conn)
+    if version < 13:
+        _migrate_v13(conn)
 
 
 _V2_STATEMENTS = (
@@ -557,6 +559,40 @@ def _migrate_v12(conn: sqlite3.Connection) -> None:
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS message_jobs_queue ON message_jobs(state,id)")
         conn.execute("UPDATE schema_version SET version=12")
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise
+
+
+_V13_STATEMENTS = (
+    # Codes and tokens are stored as SHA-256 hashes only; expires_at is epoch seconds, the other dates ISO strings.
+    """CREATE TABLE IF NOT EXISTS oauth_clients (
+      client_id TEXT PRIMARY KEY, client_info_json TEXT NOT NULL, client_name TEXT,
+      created_at TEXT NOT NULL, last_used_at TEXT, revoked_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS oauth_codes (
+      code_hash TEXT PRIMARY KEY, client_id TEXT NOT NULL REFERENCES oauth_clients(client_id), redirect_uri TEXT,
+      code_challenge TEXT NOT NULL, scopes TEXT NOT NULL, resource TEXT, expires_at INTEGER NOT NULL, used_at TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS oauth_tokens (
+      token_hash TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('access','refresh')), client_id TEXT NOT NULL REFERENCES oauth_clients(client_id),
+      scopes TEXT NOT NULL, resource TEXT, expires_at INTEGER NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT, parent_hash TEXT
+    )""",
+    "CREATE INDEX IF NOT EXISTS oauth_tokens_client ON oauth_tokens(client_id, kind)",
+    "CREATE INDEX IF NOT EXISTS oauth_tokens_parent ON oauth_tokens(parent_hash)",
+    "CREATE INDEX IF NOT EXISTS agent_clients_remote ON agent_clients(remote_client_id)",
+)
+
+
+def _migrate_v13(conn: sqlite3.Connection) -> None:
+    """v12 -> v13. Remote access (OAuth clients, codes, tokens) and the remote client behind an agent_clients row; migrate() took the backup."""
+    conn.commit(); conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()[0] < 13:
+            if "remote_client_id" not in {row[1] for row in conn.execute("PRAGMA table_info(agent_clients)")}:
+                conn.execute("ALTER TABLE agent_clients ADD COLUMN remote_client_id TEXT")
+            for statement in _V13_STATEMENTS: conn.execute(statement)
+            conn.execute("UPDATE schema_version SET version=13")
         conn.commit()
     except Exception:
         conn.rollback(); raise

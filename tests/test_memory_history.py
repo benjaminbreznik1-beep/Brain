@@ -94,7 +94,7 @@ def test_v3_migrates_to_v4_without_losing_rows_or_embeddings(tmp_path):
     conn.execute("INSERT INTO memory_embeddings VALUES(?,?,?,?,?)", (memory_id, EMBEDDING_MODEL, EMBEDDING_DIM, embedding_hash("title", "body", "tag"), vector))
     conn.commit(); conn.close()
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 13
     assert migrated.execute("SELECT project,pinned FROM memories").fetchone()[:] == (None, 0)
     assert migrated.execute("SELECT vec FROM memory_embeddings WHERE memory_id=?", (memory_id,)).fetchone()[0] == vector
     migrated.close()
@@ -114,13 +114,13 @@ def test_v4_migrates_to_v5_without_losing_rows_revisions_or_embeddings(tmp_path)
     conn.execute("INSERT INTO memory_embeddings VALUES(?,?,?,?,?)", (memory_id, EMBEDDING_MODEL, EMBEDDING_DIM, embedding_hash("title", "new", "tag"), vector))
     conn.commit(); conn.close()
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 13
     assert migrated.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
     assert migrated.execute("SELECT COUNT(*) FROM memory_revisions").fetchone()[0] == 1
     assert migrated.execute("SELECT vec FROM memory_embeddings WHERE memory_id=?", (memory_id,)).fetchone()[0] == vector
     migrated.close()
     again = connect(path)
-    assert again.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+    assert again.execute("SELECT version FROM schema_version").fetchone()[0] == 13
 
 
 def test_memory_links_validate_list_unlink_and_restore(memory_tools):

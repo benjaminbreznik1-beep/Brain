@@ -27,6 +27,7 @@
       <a href="/audit" class="{{ 'on' if active == 'audit' }}">Audit</a>
       <a href="/maintenance" class="{{ 'on' if active == 'maintenance' }}">Maintenance{% if maintenance_count %} <span class="ado-change-badge" title="Applied changes or open flags">!</span>{% endif %}</a>
       <a href="/ado" class="{{ 'on' if active == 'ado' }}">ADO <span class="ado-change-badge" hidden title="ADO changed since you last looked">!</span></a>
+      <a href="/remote" class="{{ 'on' if active == 'remote' }}">Remote</a>
     </nav>
     <span class="spacer"></span>
     {% block topbar_extra %}{% endblock %}

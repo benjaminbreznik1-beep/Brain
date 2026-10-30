@@ -2,13 +2,13 @@
 {% block title %}Agents · Brain{% endblock %}
 {% block body %}
 <h1>Agents</h1>
-<p class="muted">Connected now means last seen under 5 minutes and its PID is alive.</p>
+<p class="muted">Connected now means last seen under 5 minutes and its PID is alive (remote clients have no PID).</p>
 <table>
   <thead><tr><th>Client</th><th class="num">PID</th><th>CWD</th><th>Last seen</th><th class="num">Calls</th></tr></thead>
   <tbody>
   {% for x in clients %}
     <tr>
-      <td>{{ x.client_name }} {% if x.connected %}<span class="badge ok">connected</span>{% endif %}</td>
+      <td>{{ x.client_name }}{% if x.remote_client_id %} (remote){% endif %} {% if x.connected %}<span class="badge ok">connected</span>{% endif %}</td>
       <td class="num">{{ x.pid }}</td>
       <td class="mono">{{ x.cwd }}</td>
       <td><time data-rel datetime="{{ x.last_seen_at }}">{{ x.last_seen_at }}</time></td>
@@ -25,7 +25,7 @@
   {% for x in calls %}
     <tr>
       <td><time data-rel datetime="{{ x.at }}">{{ x.at }}</time></td>
-      <td>{{ x.client_name }}</td>
+      <td>{{ x.client_name }}{% if x.remote_client_id %} (remote){% endif %}</td>
       <td>{{ x.tool }}{% if not x.ok %} <span class="badge error">error</span>{% endif %}</td>
       <td class="mono muted">{{ x.args_summary }}</td>
     </tr>

@@ -10,6 +10,7 @@ import os
 import socket
 import sys
 import time
+from contextvars import ContextVar
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -21,9 +22,12 @@ from . import messages
 log = logging.getLogger("devmem.mcp")
 from .db import connection, context_text, embed_memory, hybrid_search, is_stale, not_superseded_sql, now, project_for_cwd, restore_memory, similar_memories, validate_content, validate_review_after
 
-mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Link related memories instead of repeating their content. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
+INSTRUCTIONS = "Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Link related memories instead of repeating their content. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys."
+mcp = FastMCP("devmem", instructions=INSTRUCTIONS)
 _client_id: int | None = None
 _client_name: str | None = None
+# Set per tool call by the remote (mcp-http) server: (agent_clients id, client name). The globals above are stdio-only.
+_remote_client: ContextVar[tuple[int, str] | None] = ContextVar("devmem_remote_client", default=None)
 
 
 class _PanelNoRedirect(HTTPRedirectHandler):
@@ -156,8 +160,15 @@ def _ado_status(snapshot: dict[str, Any], section: str) -> dict[str, Any]:
     return result
 
 
+def _name() -> str | None:
+    remote = _remote_client.get()
+    return remote[1] if remote else _client_name
+
+
 def _client(ctx: Context | None = None) -> tuple[int, str | None]:
     global _client_id, _client_name
+    remote = _remote_client.get()
+    if remote: return remote[0], None
     cwd = os.getcwd()
     project = project_for_cwd(cwd)
     info = getattr(getattr(getattr(ctx, "session", None), "client_params", None), "clientInfo", None) if ctx else None
@@ -214,7 +225,7 @@ def memory_save(content: str, title: str | None = None, kind: str = "note", tags
         review = validate_review_after(review_after)
         with connection() as conn:
             cur = conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,review_after,created_at,updated_at,source_agent) VALUES (?,?,?,?,?,?,?,?,?,?)",
-              (selected, kind, title or content[:80], content, tags or "", int(pinned), review, now(), now(), _client_name or "mcp-client"))
+              (selected, kind, title or content[:80], content, tags or "", int(pinned), review, now(), now(), _name() or "mcp-client"))
             result = {"id": cur.lastrowid}
             conn.commit()  # loading the embedding model can take seconds; do not hold the write lock meanwhile
             if os.environ.get("DEVMEM_EMBED") != "0":
@@ -321,7 +332,7 @@ def memory_history(id: int, limit: int = 10, ctx: Context | None = None) -> list
 def memory_restore(id: int, revision_id: int, ctx: Context | None = None) -> dict:
     def work():
         with connection() as conn:
-            restore_memory(conn, id, revision_id, _client_name or "mcp-client")
+            restore_memory(conn, id, revision_id, _name() or "mcp-client")
         return _get(id)
     return _call("memory_restore", {"id": id, "revision_id": revision_id}, work, ctx)
 
@@ -399,10 +410,11 @@ WAIT_MAX_S = 60
 
 def _me(sender: str | None) -> str:
     """Subagents share the parent's MCP connection, so only a self-declared name tells them apart."""
-    return (sender or "").strip() or _client_name or "mcp-client"
+    return (sender or "").strip() or _name() or "mcp-client"
 
 
 def _sender_kind(declared: bool) -> str:
+    if _remote_client.get(): return "claude"
     if "codex" in (_client_name or "").lower(): return "codex"
     return "subagent" if declared else "claude"
 
@@ -411,7 +423,7 @@ def _sender_kind(declared: bool) -> str:
 def message_post(body: str, to: str = "*", subject: str | None = None, kind: str = "message", reply_to: int | None = None, sender: str | None = None, ctx: Context | None = None) -> dict:
     def work():
         _, project = _client()
-        declared = bool((sender or "").strip()) and sender.strip() != _client_name
+        declared = bool((sender or "").strip()) and sender.strip() != _name()
         with connection() as conn:
             message_id = messages.post(conn, body, sender=_me(sender), sender_kind=_sender_kind(declared), to=to, subject=subject, kind=kind,
                                        reply_to=reply_to, project=project, declared=declared)

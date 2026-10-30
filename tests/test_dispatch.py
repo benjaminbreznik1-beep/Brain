@@ -222,6 +222,7 @@ def test_v11_migration_preserves_memories_and_adds_queue(tmp_path, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(db, "SCHEMA_VERSION", 11)
         patch.setattr(db, "_migrate_v12", lambda conn: None)
+        patch.setattr(db, "_migrate_v13", lambda conn: None)
         old = db.connect(path)
         old.execute("INSERT INTO memories(kind,title,content,created_at,updated_at) VALUES('note','kept','kept',?,?)", (db.now(), db.now()))
         old.commit(); old.close()
@@ -229,7 +230,7 @@ def test_v11_migration_preserves_memories_and_adds_queue(tmp_path, monkeypatch):
     try:
         assert upgraded.execute("SELECT title FROM memories").fetchone()[0] == "kept"
         assert upgraded.execute("SELECT COUNT(*) FROM message_jobs").fetchone()[0] == 0
-        assert upgraded.execute("SELECT version FROM schema_version").fetchone()[0] == 12
-        assert list((tmp_path / "backups").glob("devmem-before-v12-from-v11-*.db"))
+        assert upgraded.execute("SELECT version FROM schema_version").fetchone()[0] == 13
+        assert list((tmp_path / "backups").glob("devmem-before-v13-from-v11-*.db"))
     finally:
         upgraded.close()

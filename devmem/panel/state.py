@@ -124,10 +124,10 @@ def _pid_alive(pid) -> bool:
 
 
 def client_connected(client: dict[str, Any]) -> bool:
-    """Same rule as the /agents page: not ended, seen in the last 5 minutes and PID alive."""
+    """Same rule as the /agents page: not ended, seen in the last 5 minutes and PID alive (remote clients have no PID)."""
     seen = parse_ts(client.get("last_seen_at"))
     return (client.get("ended_at") is None and seen is not None
-            and (_now() - seen).total_seconds() < CONNECTED_S and _pid_alive(client.get("pid")))
+            and (_now() - seen).total_seconds() < CONNECTED_S and (bool(client.get("remote_client_id")) or _pid_alive(client.get("pid"))))
 
 
 def agent_family(name: str | None) -> str:
@@ -140,15 +140,16 @@ def agent_family(name: str | None) -> str:
 
 
 def connected_clients(conn) -> list[dict[str, Any]]:
-    rows = _rows(conn, """SELECT a.id, a.client_name, a.client_version, a.pid, a.project, a.started_at, a.last_seen_at, a.ended_at,
+    rows = _rows(conn, """SELECT a.id, a.client_name, a.client_version, a.pid, a.project, a.started_at, a.last_seen_at, a.ended_at, a.remote_client_id,
         (SELECT tool FROM tool_calls t WHERE t.client_id=a.id ORDER BY t.id DESC LIMIT 1) last_tool
         FROM agent_clients a WHERE a.ended_at IS NULL ORDER BY a.id DESC LIMIT 100""")
     out = []
     for r in rows:
         if client_connected(r):
-            out.append({"id": r["id"], "client_name": r["client_name"], "family": agent_family(r["client_name"]), "pid": r["pid"],
-                        "project": r["project"], "project_name": basename(r["project"]), "last_seen": _iso(r["last_seen_at"]),
-                        "last_tool": r["last_tool"]})
+            remote = bool(r["remote_client_id"])
+            out.append({"id": r["id"], "client_name": f"{r['client_name']} (remote)" if remote else r["client_name"], "family": agent_family(r["client_name"]),
+                        "pid": r["pid"], "project": r["project"], "project_name": basename(r["project"]), "last_seen": _iso(r["last_seen_at"]),
+                        "last_tool": r["last_tool"], "remote": remote})
     return out
 
 
@@ -267,12 +268,13 @@ def graph(conn, sessions: list[dict[str, Any]], clients: list[dict[str, Any]]) -
                        "active": s["age_s"] is not None and s["age_s"] < 120, "connected": False})
     covered = {(agent_family(a["agent"]), a["project"]) for a in agents}
     for c in clients:
-        if (c["family"], c["project"]) in covered:
+        # A remote client is never one of the local sessions, so it always gets its own node.
+        if not c.get("remote") and (c["family"], c["project"]) in covered:
             for a in agents:
                 if agent_family(a["agent"]) == c["family"] and a["project"] == c["project"]:
                     a["connected"] = True
             continue
-        covered.add((c["family"], c["project"]))
+        if not c.get("remote"): covered.add((c["family"], c["project"]))
         agents.append({"id": f"mcp:{c['id']}", "agent": c["family"], "session_id": None,
                        "project": c["project"] if c["project"] in chosen else None, "project_name": c["project_name"],
                        "active": False, "connected": True})

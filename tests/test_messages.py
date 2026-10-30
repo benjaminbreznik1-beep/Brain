@@ -421,10 +421,10 @@ def test_v8_database_migrates_with_backup(tmp_path, monkeypatch):
     conn.execute("INSERT INTO maintenance_runs(trigger,started_at,status) VALUES('manual',?,'success')", (now(),))
     conn.commit(); conn.close()
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION == 12
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION == 13
     assert migrated.execute("SELECT title FROM memories").fetchone()[0] == "kept" and migrated.execute("SELECT COUNT(*) FROM maintenance_runs").fetchone()[0] == 1
     assert {"messages", "message_reads", "subagents", "subagent_tools", "subagent_texts"} <= {r[0] for r in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    backup = sqlite3.connect(next((tmp_path / "backups").glob("devmem-before-v12-from-v8-*.db")))
+    backup = sqlite3.connect(next((tmp_path / "backups").glob("devmem-before-v13-from-v8-*.db")))
     assert backup.execute("SELECT version FROM schema_version").fetchone()[0] == 8 and backup.execute("SELECT title FROM memories").fetchone()[0] == "kept"
     assert not list((tmp_path / "backups").glob("*.tmp"))
 
@@ -446,9 +446,9 @@ def test_v9_database_migrates_to_v10_and_repairs_open_agent_threads(tmp_path, mo
     conn.execute("UPDATE messages SET thread_id=id WHERE id=?", (spawn,)); conn.execute("UPDATE subagents SET spawn_msg_id=? WHERE agent_id='old'", (spawn,))
     conn.commit(); conn.close()
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 13
     assert migrated.execute("SELECT byte_offset FROM subagents").fetchone()[0] == 0  # re-read once for remarks and the end marker
-    assert list((tmp_path / "backups").glob("devmem-before-v12-from-v9-*.db"))
+    assert list((tmp_path / "backups").glob("devmem-before-v13-from-v9-*.db"))
     migrated.close()
     ingest_all(); ingest_all()
     with connection() as conn:
@@ -822,9 +822,9 @@ def test_spawned_claude_session_does_not_make_chat_attachment_ambiguous():
 def test_v10_database_migrates_to_v11_with_codex_columns(tmp_path, monkeypatch):
     path = tmp_path / "v10.db"; _old_database(monkeypatch, path, 10).close()
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 13
     assert {"agent_kind", "model", "handoff_id", "handoff_session_id"} <= {row[1] for row in migrated.execute("PRAGMA table_info(subagents)")}
-    assert list((tmp_path / "backups").glob("devmem-before-v12-from-v10-*.db"))
+    assert list((tmp_path / "backups").glob("devmem-before-v13-from-v10-*.db"))
 
 
 def test_chat_title_and_state_come_as_parts_and_keep_a_dot_inside_a_subject():

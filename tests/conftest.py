@@ -26,6 +26,8 @@ def _test_db(monkeypatch, tmp_path):
     monkeypatch.setenv("DEVMEM_CODEX_HOME", str(tmp_path / "codex_home"))
     monkeypatch.setenv("DEVMEM_CLAUDE_LIMITS", str(tmp_path / "claude_limits.json"))
     monkeypatch.setenv("DEVMEM_REMINDERS", str(tmp_path / "reminders.json"))
+    # The panel reads remote.json on every request (extra trusted hosts); never the real one.
+    monkeypatch.setenv("DEVMEM_REMOTE", str(tmp_path / "remote.json"))
     monkeypatch.delenv("DEVMEM_MAINTAIN_CHILD", raising=False)
     monkeypatch.delenv("DEVMEM_ADO_ORG", raising=False)
     monkeypatch.delenv("DEVMEM_ADO_PROJECT", raising=False)

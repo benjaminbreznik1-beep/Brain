@@ -971,9 +971,9 @@ def test_v6_database_migrates_with_backup(tmp_path, monkeypatch):
     conn.execute("INSERT INTO memories(kind,title,content,created_at,updated_at) VALUES('note','kept','body',?,?)", (now(), now()))
     conn.execute("DROP TABLE maintenance_changes"); conn.execute("DROP TABLE maintenance_runs"); conn.execute("UPDATE schema_version SET version=6"); conn.commit(); conn.close()
     migrated = connect(path)
-    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12 and migrated.execute("SELECT title FROM memories").fetchone()[0] == "kept"
+    assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 13 and migrated.execute("SELECT title FROM memories").fetchone()[0] == "kept"
     assert {"full", "options", "note"} <= {r[1] for r in migrated.execute("PRAGMA table_info(maintenance_runs)")}
-    backup = sqlite3.connect(next((tmp_path / "backups").glob("devmem-before-v12-from-v6-*.db")))
+    backup = sqlite3.connect(next((tmp_path / "backups").glob("devmem-before-v13-from-v6-*.db")))
     assert backup.execute("SELECT version FROM schema_version").fetchone()[0] == 6 and backup.execute("SELECT title FROM memories").fetchone()[0] == "kept"
 
 
@@ -985,7 +985,7 @@ def test_v7_database_gains_v8_columns_and_keeps_rows(tmp_path):
     migrated = connect(path)
     assert tuple(migrated.execute("SELECT status,full FROM maintenance_runs").fetchone()) == ("success", 0)
     assert {"old_review_after", "new_review_after", "seen_at"} <= {r[1] for r in migrated.execute("PRAGMA table_info(maintenance_changes)")}
-    assert list((tmp_path / "backups").glob("devmem-before-v12-from-v7-*.db"))
+    assert list((tmp_path / "backups").glob("devmem-before-v13-from-v7-*.db"))
 
 
 # ---------------------------------------------------------------- cleanup
