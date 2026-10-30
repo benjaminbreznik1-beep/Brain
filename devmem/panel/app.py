@@ -304,6 +304,19 @@ def _ado_loop(stop: threading.Event):
             return
 
 
+def _git_sync_loop(stop: threading.Event):
+    while not stop.is_set():
+        try:
+            from .. import git_sync
+            cfg = git_sync.config()
+            interval = max(1, int(cfg.get("interval_s", 300)))
+            if cfg.get("enabled"): git_sync.sync()
+        except Exception:
+            log.exception("GitHub sync loop error")
+            interval = 300
+        if stop.wait(interval): return
+
+
 class StateCache:
     """One snapshot shared by every request/stream client, rebuilt at most every STATE_TTL_S."""
 
@@ -330,9 +343,11 @@ async def lifespan(app: FastAPI):
     stop = threading.Event()
     thread = threading.Thread(target=_ingest_loop, args=(stop,), daemon=True)
     ado_thread = threading.Thread(target=_ado_loop, args=(stop,), daemon=True)
+    git_thread = threading.Thread(target=_git_sync_loop, args=(stop,), daemon=True)
     dispatch_thread = threading.Thread(target=dispatch_loop, args=(stop,), daemon=True)
     thread.start()
     ado_thread.start()
+    git_thread.start()
     dispatch_thread.start()
     try:
         yield
@@ -340,6 +355,7 @@ async def lifespan(app: FastAPI):
         stop.set()
         thread.join(timeout=1)
         ado_thread.join(timeout=1)
+        git_thread.join(timeout=1)
         dispatch_thread.join(timeout=5)
 
 
@@ -572,6 +588,8 @@ def memory(request: Request, q: str = "", kind: str = ""):
         rows = _rows(sql + " ORDER BY updated_at DESC LIMIT 200", params)
     for row in rows:
         row["stale"] = is_stale(row.get("review_after"))
+        from ..git_sync import in_scope
+        row["synced"] = in_scope(row)
     return render(request, "memory.html", rows=rows, q=q, kind=kind, embedder_status=embedder_status,
                   counts=_rows("SELECT kind,COUNT(*) count FROM memories GROUP BY kind"))
 
@@ -628,7 +646,18 @@ def maintenance(request: Request):
         except (TypeError, ValueError): change["evidence_items"] = None
         if not isinstance(change["evidence_items"], list):  # fix(2026-10-28): say so instead of showing "no evidence"
             change["evidence_items"] = [{"ref": "corrupt evidence record", "result": "the stored evidence could not be read"}]
-    return render(request, "maintenance.html", runs=runs, changes=changes, failing=failing, notice=request.query_params.get("notice"))
+    from .. import git_sync
+    try: git_status = git_sync.status()
+    except ValueError as exc: git_status = {"enabled": False, "error": str(exc), "out_of_sync": []}
+    return render(request, "maintenance.html", runs=runs, changes=changes, failing=failing, git_status=git_status, notice=request.query_params.get("notice"))
+
+
+@app.post("/git/sync")
+def git_sync_now():
+    from .. import git_sync
+    result = git_sync.sync()
+    notice = result.get("errors") and "; ".join(result["errors"]) or "GitHub sync finished"
+    return RedirectResponse("/maintenance?notice=" + quote(notice), 303)
 
 
 @app.post("/maintenance/cleanup")

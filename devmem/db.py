@@ -92,6 +92,25 @@ def validate_content(content: str) -> None:
         raise ValueError(f"content exceeds the {max_content()} character limit; put long material in a file and save a short summary plus the file path")
 
 
+def save_memory(conn: sqlite3.Connection, *, content: str, title: str | None = None, kind: str = "note", tags: str = "", project: str | None = None, pinned: bool = False, review_after: str | None = None, source_agent: str = "mcp-client") -> int:
+    """Insert one validated memory and return its id."""
+    if kind not in {"note", "decision", "preference", "snippet", "todo"}: raise ValueError("invalid kind")
+    validate_content(content); review_after = validate_review_after(review_after)
+    return conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,review_after,created_at,updated_at,source_agent) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (project, kind, title or content[:80], content, tags, int(pinned), review_after, now(), now(), source_agent)).lastrowid
+
+
+def update_memory(conn: sqlite3.Connection, id: int, *, content: str | None = None, title: str | None = None, tags: str | None = None, kind: str | None = None, pinned: bool | None = None, review_after: str | None = None) -> bool:
+    """Update one memory; the revision trigger retains its prior content."""
+    fields = {k: v for k, v in {"content": content, "title": title, "tags": tags, "kind": kind, "pinned": pinned, "review_after": review_after}.items() if v is not None}
+    if kind and kind not in {"note", "decision", "preference", "snippet", "todo"}: raise ValueError("invalid kind")
+    if content is not None: validate_content(content)
+    if review_after is not None: fields["review_after"] = validate_review_after(review_after)
+    if not fields: return bool(conn.execute("SELECT 1 FROM memories WHERE id=?", (id,)).fetchone())
+    fields["updated_at"] = now()
+    return bool(conn.execute("UPDATE memories SET " + ", ".join(f"{key}=?" for key in fields) + " WHERE id=?", (*fields.values(), id)).rowcount)
+
+
 def validate_review_after(value: str | None) -> str | None:
     """Validate an optional ISO calendar date and return its canonical form."""
     if value is None or value == "":

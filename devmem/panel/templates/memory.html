@@ -45,6 +45,7 @@
     <span class="badge kind-{{ x.kind }}">{{ x.kind }}</span>
     {% if x.match %}<span class="badge">{{ x.match }}</span>{% endif %}
     {% if x.stale %}<span class="badge">stale</span>{% endif %}
+    {% if x.synced %}<span class="badge">synced</span>{% endif %}
     <span class="m-title">{{ x.title }}</span>
     <span class="m-meta"><span class="mono">{{ x.project or 'global' }}</span><time data-rel datetime="{{ x.updated_at }}">{{ x.updated_at }}</time></span>
   </summary>

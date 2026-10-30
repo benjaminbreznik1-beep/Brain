@@ -15,6 +15,11 @@ def _test_db(monkeypatch, tmp_path):
     monkeypatch.setenv("DEVMEM_BACKUP_DIR", str(tmp_path / "backups"))
     monkeypatch.setenv("DEVMEM_AUDIT", str(tmp_path / "audit.json"))
     monkeypatch.setenv("DEVMEM_ADO_CONFIG", str(tmp_path / "ado.json"))
+    monkeypatch.setenv("DEVMEM_GIT_SYNC", str(tmp_path / "git-sync.json"))
+    monkeypatch.setenv("DEVMEM_GIT_SYNC_STATE", str(tmp_path / "git-sync-state.json"))
+    monkeypatch.setenv("DEVMEM_GIT_SYNC_KEY", str(tmp_path / "git-sync-key"))
+    monkeypatch.setenv("DEVMEM_GIT_DIR", str(tmp_path / "git-memories"))
+    monkeypatch.setenv("DEVMEM_GIT_SYNC_LOCK", str(tmp_path / "git-sync.lock"))
     monkeypatch.setenv("DEVMEM_DISPATCH", str(tmp_path / "dispatch.json"))
     monkeypatch.setenv("DEVMEM_DISPATCH_LOCK", str(tmp_path / "dispatch.lock"))
     # Maintenance must never see the real ~/.devmem lock, config or log.

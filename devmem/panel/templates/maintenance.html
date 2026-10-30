@@ -5,6 +5,14 @@
 {% if notice %}<p class="card">{{ notice }}</p>{% endif %}
 {% if failing %}<p class="card maintenance-failing"><strong>Automatic maintenance is failing</strong> since {{ failing.since }}: {{ failing.error }}</p>{% endif %}
 <form method="post" action="/maintenance/cleanup"><button>Clean up</button></form>
+<section class="card">
+  <h2>GitHub sync</h2>
+  <p>{% if git_status.enabled %}Enabled{% else %}Disabled{% endif %}{% if git_status.repo %} · <span class="mono">{{ git_status.repo }}</span>{% endif %}</p>
+  <p class="muted">Last sync: {{ (git_status.last_sync | when) or 'not yet' }} · pushed {{ git_status.pushed or 0 }} · pulled {{ git_status.pulled or 0 }}</p>
+  {% if git_status.error %}<p class="muted">{{ git_status.error }}</p>{% endif %}
+  {% if git_status.out_of_sync %}<p class="muted">Out of sync: {{ git_status.out_of_sync | join(', ') }}</p>{% endif %}
+  <form method="post" action="/git/sync"><button type="submit">Sync now</button></form>
+</section>
 <h2>Runs</h2>
 <table><thead><tr><th>Time</th><th>Trigger</th><th>Project</th><th>Checked</th><th>Applied</th><th>Flags</th><th>Status</th><th>Error / note</th></tr></thead><tbody>
 {% for x in runs %}<tr><td class="when"><time datetime="{{ x.started_at }}" title="{{ x.started_at }}">{{ x.started_at | when }}</time></td><td>{{ x.trigger }}</td><td>{{ x.project or 'all' }}</td><td>{{ x.checked }}</td><td>{{ x.applied }}</td><td>{{ x.flagged }}</td><td>{{ x.status }}</td><td>{% if x.error %}<span class="run-error">{{ x.error }}</span>{% endif %}{% if x.note %} <span class="muted">{{ x.note }}</span>{% endif %}</td></tr>{% else %}<tr><td colspan="8" class="muted">No maintenance runs.</td></tr>{% endfor %}

@@ -19,7 +19,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from . import messages
 
 log = logging.getLogger("devmem.mcp")
-from .db import connection, context_text, embed_memory, hybrid_search, is_stale, not_superseded_sql, now, project_for_cwd, restore_memory, similar_memories, validate_content, validate_review_after
+from .db import connection, context_text, embed_memory, hybrid_search, is_stale, not_superseded_sql, now, project_for_cwd, restore_memory, save_memory, similar_memories, update_memory, validate_content, validate_review_after
 
 mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Link related memories instead of repeating their content. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
@@ -213,14 +213,13 @@ def memory_save(content: str, title: str | None = None, kind: str = "note", tags
         validate_content(content)
         review = validate_review_after(review_after)
         with connection() as conn:
-            cur = conn.execute("INSERT INTO memories(project,kind,title,content,tags,pinned,review_after,created_at,updated_at,source_agent) VALUES (?,?,?,?,?,?,?,?,?,?)",
-              (selected, kind, title or content[:80], content, tags or "", int(pinned), review, now(), now(), _client_name or "mcp-client"))
-            result = {"id": cur.lastrowid}
+            memory_id = save_memory(conn, content=content, title=title, kind=kind, tags=tags or "", project=selected, pinned=pinned, review_after=review, source_agent=_client_name or "mcp-client")
+            result = {"id": memory_id}
             conn.commit()  # loading the embedding model can take seconds; do not hold the write lock meanwhile
             if os.environ.get("DEVMEM_EMBED") != "0":
                 try:
-                    if embed_memory(conn, cur.lastrowid):
-                        similar = similar_memories(conn, cur.lastrowid, selected)
+                    if embed_memory(conn, memory_id):
+                        similar = similar_memories(conn, memory_id, selected)
                         if similar: result["similar"] = similar
                 except Exception as exc:  # hints are optional; the memory is already saved
                     print(f"devmem: similar check skipped: {type(exc).__name__}: {exc}"[:250], file=sys.stderr)
@@ -288,14 +287,8 @@ def memory_unlink(from_id: int, to_id: int, type: str | None = None, ctx: Contex
 @mcp.tool(description="Correct an existing memory when a fact changes; its prior version is kept in history. Never use for secrets. Content is capped: put long material in a file and save a short summary plus its path. Set review_after (YYYY-MM-DD, usually about 14 days out) for status, handoff, or in-progress notes.")
 def memory_update(id: int, content: str | None = None, title: str | None = None, tags: str | None = None, kind: str | None = None, pinned: bool | None = None, review_after: str | None = None, ctx: Context | None = None) -> dict:
     def work():
-        fields = {k:v for k,v in {"content":content,"title":title,"tags":tags,"kind":kind,"pinned":pinned,"review_after":review_after}.items() if v is not None}
-        if kind and kind not in {"note","decision","preference","snippet","todo"}: raise ValueError("invalid kind")
-        if content is not None: validate_content(content)
-        if review_after is not None: fields["review_after"] = validate_review_after(review_after)
-        if not fields: return _get(id) or {"id": id, "missing": True}
-        fields["updated_at"] = now()
         with connection() as conn:
-            conn.execute("UPDATE memories SET " + ", ".join(f"{k}=?" for k in fields) + " WHERE id=?", (*fields.values(), id))
+            update_memory(conn, id, content=content, title=title, tags=tags, kind=kind, pinned=pinned, review_after=review_after)
         return _get(id) or {"id": id, "missing": True}
     return _call("memory_update", {"id":id, "pinned":pinned, "review_after":review_after}, work, ctx)
 

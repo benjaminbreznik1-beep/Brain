@@ -177,6 +177,14 @@ def main() -> None:
     maintain.add_argument("--transcript")
     cleanup = sub.add_parser("maintenance-cleanup")
     cleanup.add_argument("--dry-run", action="store_true")
+    git = sub.add_parser("git")
+    git_sub = git.add_subparsers(dest="git_command", required=True)
+    setup = git_sub.add_parser("setup")
+    setup.add_argument("--repo", required=True); setup.add_argument("--name", required=True); setup.add_argument("--email", required=True)
+    git_sub.add_parser("sync").add_argument("--dry-run", action="store_true")
+    git_sub.add_parser("status")
+    for name in ("allow", "deny"):
+        command = git_sub.add_parser(name); command.add_argument("project")
     args = parser.parse_args()
     if args.command == "mcp":
         from .mcp_server import run; run()
@@ -260,6 +268,30 @@ def main() -> None:
         from .maintenance import cleanup
         result = cleanup(dry_run=args.dry_run)
         print(result.get("line") or result["status"])
+    elif args.command == "git":
+        from . import git_sync
+        if args.git_command == "status": print(json.dumps(git_sync.status(), separators=(",", ":")))
+        elif args.git_command in ("allow", "deny"):
+            cfg = git_sync.config(); projects = list(cfg.get("projects", []))
+            if args.git_command == "allow" and args.project not in projects: projects.append(args.project)
+            if args.git_command == "deny": projects = [x for x in projects if x != args.project]
+            cfg["projects"] = projects; git_sync.write_config(cfg); print("updated")
+        elif args.git_command == "setup":
+            if not re.fullmatch(r"[^/\s]+/[^/\s]+", args.repo): parser.error("--repo must be owner/name")
+            cfg = {"enabled": True, "repo": args.repo, "branch": "main", "author_name": args.name, "author_email": args.email,
+                   "projects": ["thesis", "personal-webpage", "devmem"], "global_tag": "personal", "interval_s": 300}
+            git_sync.write_config(cfg)
+            key = git_sync.key_path()
+            if not key.exists():
+                key.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+                os.chmod(key, 0o600); os.chmod(str(key) + ".pub", 0o600)
+            print(key.with_suffix(key.suffix + ".pub").read_text(encoding="utf-8").strip())
+            input("Add this public key in GitHub Settings → Deploy keys with write access, then press Enter: ")
+            result = git_sync.sync(); print(json.dumps(result, separators=(",", ":")))
+        else:
+            result = git_sync.sync(dry_run=args.dry_run); print(json.dumps(result, separators=(",", ":")))
+            if result["errors"]: raise SystemExit(1)
     else:
         if not fts_query(args.q): return
         with connection() as conn:
