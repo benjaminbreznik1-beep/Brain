@@ -182,7 +182,7 @@ def _call(tool: str, args: dict[str, Any], fn, ctx: Context | None = None, start
     try:
         result = fn()
         count = len(result) if isinstance(result, list) else 1
-        ok, error = 1, None
+        ok, error = (0, result.get("error")) if isinstance(result, dict) and result.get("ok") is False else (1, None)
         return result
     except Exception as exc:
         count, ok, error = 0, 0, str(exc)
@@ -297,7 +297,7 @@ def memory_update(id: int, content: str | None = None, title: str | None = None,
     return _call("memory_update", {"id":id, "pinned":pinned, "review_after":review_after}, work, ctx)
 
 
-@mcp.tool(description="Use this instead of two memory_update calls whenever a tracked task's phase changes. It updates the board and optional task entry atomically.")
+@mcp.tool(description="Use this instead of two memory_update calls when a tracked task's phase changes. It sets the board entry's PHASE and the board's 'Status as of' date. When status is given, it also writes the task memory's 'STATUS (date): ...' line; that memory is entry_id, or the single memory titled '<entry_title_prefix> <task> ...' in the board's project. All or nothing and committed on success; returns ok:false with an error instead of raising for expected failures; dry_run previews without writing.")
 def task_status_set(board_id: int, task: str, phase: str, status: str | None = None, entry_id: int | None = None,
                     entry_title_prefix: str = "Phase 2 task", dry_run: bool = False, ctx: Context | None = None) -> dict:
     def work():
@@ -307,7 +307,7 @@ def task_status_set(board_id: int, task: str, phase: str, status: str | None = N
     return _call("task_status_set", {"board_id": board_id, "task": task, "entry_id": entry_id, "dry_run": dry_run}, work, ctx)
 
 
-@mcp.tool(description="Return a task board's parsed sections, numbered entries, phases, and status date.")
+@mcp.tool(description="Return a task board's numbered entries (section, n, task, title, phase) and its 'Status as of' date.")
 def task_board(board_id: int, ctx: Context | None = None) -> dict:
     return _call("task_board", {"board_id": board_id}, lambda: _task_board(board_id), ctx)
 
@@ -354,7 +354,7 @@ def memory_list(limit: int = 20, kind: str | None = None, scope: str = "project"
     return _call("memory_list", {"limit":limit,"kind":kind,"scope":scope}, work, ctx)
 
 
-@mcp.tool(description="List binding devmem guard rules and invalid GUARD lines for this cwd. Codex task specifications should include the output of `devmem rules --codex`.")
+@mcp.tool(description="List binding devmem guard rules, invalid GUARD lines and notices. Pass cwd as the repo path; it defaults to the server's cwd, which may not be the repo, and then only global rules appear. Codex is not covered by the hook, so Codex task specs must include the output of `devmem rules --codex --cwd <repo>`.")
 def rules_list(cwd: str | None = None, ctx: Context | None = None) -> dict:
     def work():
         with connection() as conn: return rules_data(conn, cwd or os.getcwd())

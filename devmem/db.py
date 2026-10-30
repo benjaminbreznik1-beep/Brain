@@ -113,8 +113,8 @@ def update_memory(conn: sqlite3.Connection, id: int, *, content: str | None = No
 
 
 _BOARD_SECTION = re.compile(r"\b(NOW|NEXT|LATER):")
-_BOARD_ENTRY = re.compile(r"(?<!\S)(?P<n>\d+)\.\s+(?P<task>\S+)(?=\s)")
-_BOARD_STATUS = re.compile(r"\bStatus as of [^.]*\.")
+_BOARD_ENTRY = re.compile(r"(?:(?<!\S)|(?<=NOW:)|(?<=NEXT:)|(?<=LATER:))(?P<n>\d+)\.\s+(?P<task>\d+(?:\.\d+)+)(?=\s)")
+_BOARD_STATUS = re.compile(r"\bStatus as of (?P<date>.*?)(?:\.(?=\s|$)|(?=\n|$))")
 
 
 def parse_task_board(content: str) -> tuple[list[dict], str | None]:
@@ -134,7 +134,7 @@ def parse_task_board(content: str) -> tuple[list[dict], str | None]:
         parsed.append({"section": section, "n": int(entry.group("n")), "task": entry.group("task"),
                        "title": title, "phase": phase.strip() if separator else "", "_start": entry.start(), "_end": end})
     status = _BOARD_STATUS.search(content)
-    return parsed, status.group(0)[len("Status as of "):-1] if status else None
+    return parsed, status.group("date") if status else None
 
 
 def task_board(conn: sqlite3.Connection, board_id: int) -> dict:
@@ -142,22 +142,25 @@ def task_board(conn: sqlite3.Connection, board_id: int) -> dict:
     row = conn.execute("SELECT content FROM memories WHERE id=?", (board_id,)).fetchone()
     if not row: return {"ok": False, "error": "board not found"}
     entries, status_as_of = parse_task_board(row["content"])
+    if not entries: return {"ok": False, "error": f"no board entries found in #{board_id}"}
     return {"entries": [{key: value for key, value in entry.items() if not key.startswith("_")} for entry in entries],
             "status_as_of": status_as_of}
 
 
 def _board_today() -> tuple[str, str]:
-    current = datetime.now(UTC)
+    current = datetime.now().astimezone()
     return f"{current.day} {current:%b %Y}", f"{current.day} {current:%b}"
 
 
 def task_status_set(conn: sqlite3.Connection, board_id: int, task: str, phase: str, *, status: str | None = None,
                     entry_id: int | None = None, entry_title_prefix: str = "Phase 2 task", dry_run: bool = False) -> dict:
-    """Update a board entry and its optional task memory as one transaction."""
+    """Update a board entry and its optional task memory as one transaction; commits on success."""
     from .maintenance import SECRET
-    if not conn.in_transaction: conn.execute("BEGIN IMMEDIATE")
-    conn.execute("SAVEPOINT task_status_set")  # undo only this call's writes, never the caller's open work
+    released = started = False
     try:
+        if entry_id == board_id: raise ValueError("entry_id must differ from board_id")
+        if not dry_run and not conn.in_transaction: conn.execute("BEGIN IMMEDIATE")
+        conn.execute("SAVEPOINT task_status_set"); started = True  # failure or dry run undoes only this call's writes; success commits, including any work the caller had open
         board = conn.execute("SELECT id,content,project FROM memories WHERE id=?", (board_id,)).fetchone()
         if not board: raise ValueError("board not found")
         entries, _ = parse_task_board(board["content"])
@@ -182,7 +185,7 @@ def task_status_set(conn: sqlite3.Connection, board_id: int, task: str, phase: s
             else:
                 prefix = f"{entry_title_prefix} {task} "
                 escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                found = conn.execute(f"SELECT id,content FROM memories m WHERE project IS ? AND title LIKE ? ESCAPE '\\' AND {not_superseded_sql()} ORDER BY id",
+                found = conn.execute(f"SELECT id,content FROM memories m WHERE project IS ? AND title LIKE ? ESCAPE '\\' AND {not_superseded_any_sql()} ORDER BY id",
                                      (board["project"], escaped + "%")).fetchall()
                 if len(found) != 1: raise ValueError(f"expected exactly one entry memory for {task}, found {len(found)}")
                 entry = found[0]
@@ -196,14 +199,20 @@ def task_status_set(conn: sqlite3.Connection, board_id: int, task: str, phase: s
         if entry is not None: validate_content(new_entry)
         result = {"ok": True, "board": {"id": board_id, "old_line": old_line, "new_line": new_line}, "entry": entry_result}
         if dry_run:
-            conn.execute("ROLLBACK TO task_status_set"); conn.execute("RELEASE task_status_set"); return result
+            conn.execute("ROLLBACK TO task_status_set"); conn.execute("RELEASE task_status_set"); released = True; return result
         update_memory(conn, board_id, content=new_board)
         if entry is not None: update_memory(conn, entry["id"], content=new_entry)
-        conn.execute("RELEASE task_status_set"); conn.commit()
+        conn.execute("RELEASE task_status_set"); released = True; conn.commit()
         return result
     except Exception as exc:
-        conn.execute("ROLLBACK TO task_status_set"); conn.execute("RELEASE task_status_set")
-        return {"ok": False, "error": str(exc)}
+        if started and not released:
+            try:
+                conn.execute("ROLLBACK TO task_status_set"); conn.execute("RELEASE task_status_set")
+            except Exception as rollback_exc:
+                raise exc from rollback_exc
+        if isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower(): return {"ok": False, "error": "database busy"}
+        if isinstance(exc, ValueError): return {"ok": False, "error": str(exc)}
+        raise
 
 
 def validate_review_after(value: str | None) -> str | None:
@@ -837,6 +846,10 @@ def similar_memories(conn: sqlite3.Connection, memory_id: int, project: str | No
 
 def not_superseded_sql(alias: str = "m") -> str:
     return f"NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id={alias}.id AND sl.type='supersedes' AND sl.note='automatic maintenance')"
+
+
+def not_superseded_any_sql(alias: str = "m") -> str:
+    return f"NOT EXISTS(SELECT 1 FROM memory_links sl WHERE sl.to_id={alias}.id AND sl.type='supersedes')"
 
 
 def _bm25_candidates(conn: sqlite3.Connection, query: str, where_sql: str, params: tuple, kind: str | None) -> list[dict]:

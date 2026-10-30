@@ -58,10 +58,12 @@
   <section class="col col-right">
     <section class="card">
       <h3>Rules</h3>
-      {% if rules.rules %}
+      {% if rules.error %}<p class="muted">Rules unavailable: {{ rules.error }}</p>
+      {% elif rules.rules %}
       <table><tbody>{% for rule in rules.rules %}<tr><td class="mono">#{{ rule.id }}</td><td><span class="badge">{{ rule.action }}</span></td><td class="mono">{{ rule.tool }} {{ rule.command or rule.path or '' }}</td></tr>{% endfor %}</tbody></table>
       {% else %}<p class="muted">No active rules.</p>{% endif %}
       {% for item in rules.invalid %}<p class="muted mono">#{{ item.id }} invalid: {{ item.reason }}</p>{% endfor %}
+      {% for item in rules.notices %}<p class="muted mono">#{{ item.id }} notice: {{ item.reason }}</p>{% endfor %}
     </section>
     <div class="panel panel-agents">
       <h3>Agents <span class="hint" id="agents-hint"></span></h3>

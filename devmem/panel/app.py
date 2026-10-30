@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import messages as msgs
-from ..db import audit_memories, connection, ensure_embeddings, fts_query, hybrid_search, is_stale, not_superseded_sql, now, parse_task_board, validate_content, validate_review_after
+from ..db import audit_memories, connection, ensure_embeddings, fts_query, hybrid_search, is_stale, not_superseded_any_sql, not_superseded_sql, now, parse_task_board, validate_content, validate_review_after
 from ..guard import rules_data
 from ..embed import get_embedder
 from ..ingest.runner import ingest_all
@@ -476,9 +476,10 @@ async def api_stream(request: Request, only: str = ""):
 @app.get("/")
 def brain(request: Request):
     try:
-        with connection() as conn: rules = rules_data(conn, None)
-    except sqlite3.Error:
-        rules = {"rules": [], "invalid": []}
+        with connection() as conn: rules = rules_data(conn, None, all_scopes=True)
+    except sqlite3.Error as exc:
+        log.exception("rules loading failed")
+        rules = {"rules": [], "invalid": [], "notices": [], "error": str(exc)}
     return render(request, "brain.html", active="brain", rules=rules)
 
 
@@ -520,7 +521,7 @@ def overview(request: Request):
     with connection() as conn:
         limits, tokens = live.limits(conn), live.tokens(conn)
         boards = []
-        for row in conn.execute(f"SELECT id,title,content,tags FROM memories m WHERE {not_superseded_sql()}"):
+        for row in conn.execute(f"SELECT id,title,content,tags FROM memories m WHERE {not_superseded_any_sql()}"):
             if "board" not in re.split(r"[\s,]+", (row["tags"] or "").lower()): continue
             entries, status_as_of = parse_task_board(row["content"])
             boards.append({"id": row["id"], "title": row["title"], "entries": entries, "status_as_of": status_as_of})

@@ -206,6 +206,12 @@ def main() -> None:
                     target = rule.get("command") or rule.get("path") or ""
                     print(f"#{rule['id']} {rule['tool']} {rule['action']} {target} — {rule['title']}")
                 for item in data["invalid"]: print(f"#{item['id']} invalid GUARD: {item['reason']}")
+                for item in data["notices"]: print(f"#{item['id']} GUARD notice: {item['reason']}")
+                print("scope: global + " + data["project"] if data["project"] else "scope: global only")
+            if args.codex:
+                for item in data["invalid"]: print(f"#{item['id']} invalid GUARD: {item['reason']}", file=sys.stderr)
+                for item in data["notices"]: print(f"#{item['id']} GUARD notice: {item['reason']}", file=sys.stderr)
+                if data["invalid"]: raise SystemExit(2)
         except Exception as exc:
             print(f"devmem rules: {exc}", file=sys.stderr)
             raise SystemExit(1)
@@ -254,12 +260,17 @@ def main() -> None:
             from .db import db_path
             if args.hook and _maintain_child():
                 return
+            hook_err = os.path.expanduser(os.environ.get("DEVMEM_GUARD_HOOK_ERR", "~/.devmem/guard-hook.err"))
+            try: startup_error = args.hook and os.path.getsize(hook_err) > 0
+            except OSError: startup_error = False
             if not db_path().is_file():
+                if startup_error: print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": f"{_HOOK_HEADER}\ndevmem guard: startup errors logged in {hook_err} (rules may not be enforced)"}}))
                 return
             briefing = _context_for_cwd(_hook_cwd() if args.hook else args.cwd or os.getcwd())
-            if args.hook and briefing == _NO_CONTEXT:
+            if args.hook and briefing == _NO_CONTEXT and not startup_error:
                 return
             if args.hook:
+                if startup_error: briefing += f"\ndevmem guard: startup errors logged in {hook_err} (rules may not be enforced)"
                 print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart",
                                                           "additionalContext": f"{_HOOK_HEADER}\n{briefing}"}}))
                 # Deliberately after printing: a SessionStart briefing is never delayed or changed by maintenance.

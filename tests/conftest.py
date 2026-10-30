@@ -26,6 +26,8 @@ def _test_db(monkeypatch, tmp_path):
     monkeypatch.setenv("DEVMEM_MAINTAIN", str(tmp_path / "maintain.json"))
     monkeypatch.setenv("DEVMEM_MAINTAIN_LOCK", str(tmp_path / "maintain.lock"))
     monkeypatch.setenv("DEVMEM_MAINTAIN_LOG", str(tmp_path / "maintain.log"))
+    monkeypatch.setenv("DEVMEM_GUARD_LOG", str(tmp_path / "guard.log"))
+    monkeypatch.setenv("DEVMEM_GUARD_HOOK_ERR", str(tmp_path / "guard-hook.err"))
     # The log scanner must never read the real ~/.claude, ~/.codex or status-line snapshot.
     monkeypatch.setenv("DEVMEM_CLAUDE_HOME", str(tmp_path / "claude_home"))
     monkeypatch.setenv("DEVMEM_CODEX_HOME", str(tmp_path / "codex_home"))

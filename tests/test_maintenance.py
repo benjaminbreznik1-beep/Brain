@@ -106,6 +106,16 @@ def test_keep_never_touches_protected_memories(kind, tags, cfg):
     assert _changes(mid)[-1]["blocked_by"] == "protected"
 
 
+@pytest.mark.parametrize("action", ["update", "merge"])
+def test_guard_memory_update_and_merge_are_recorded_as_protected(action):
+    guarded = _memory('GUARD: {"tool":"Bash","action":"deny"}', review_after="2020-01-01")
+    target = _memory("ordinary target")
+    _link(guarded, target)
+    proposal = _proposal(guarded, "replacement guard", action=action, target_id=target if action == "merge" else None)
+    result = maintenance.run(engine=FakeEngine({guarded: proposal}))
+    assert result["applied"] == 0 and _changes(guarded)[-1]["blocked_by"] == "protected"
+
+
 @pytest.mark.parametrize("setup,expected", [("per_memory", "per_memory_limit"), ("revert", "recent_revert"), ("edit", "recent_edit")])
 def test_keep_obeys_per_memory_guards(setup, expected):
     mid = _memory("Plain fact", review_after="2020-01-01")
