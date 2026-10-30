@@ -20,7 +20,7 @@ from . import messages
 from .guard import rules_data, warnings as guard_warnings
 
 log = logging.getLogger("devmem.mcp")
-from .db import connection, context_text, embed_memory, hybrid_search, is_stale, not_superseded_sql, now, project_for_cwd, restore_memory, save_memory, similar_memories, update_memory, validate_content, validate_review_after
+from .db import connection, context_text, embed_memory, hybrid_search, is_stale, not_superseded_sql, now, project_for_cwd, restore_memory, save_memory, similar_memories, task_board as read_task_board, task_status_set as set_task_status, update_memory, validate_content, validate_review_after
 
 mcp = FastMCP("devmem", instructions="Local long-term coding memory. Search before non-trivial work; if project search or list is empty, retry scope='all' because the server cwd may not be the repo. After memory_save, inspect similar; if it is the same fact, update the old memory and delete the new one. Prefer memory_update when facts change; history is available through memory_history and memory_restore. Link related memories instead of repeating their content. Pinned memories are already in the briefing, so pin only what every session needs. Never store secrets, credentials, or private keys.")
 _client_id: int | None = None
@@ -295,6 +295,26 @@ def memory_update(id: int, content: str | None = None, title: str | None = None,
         if content is not None and (warnings := guard_warnings(content)): result["warnings"] = warnings
         return result
     return _call("memory_update", {"id":id, "pinned":pinned, "review_after":review_after}, work, ctx)
+
+
+@mcp.tool(description="Use this instead of two memory_update calls whenever a tracked task's phase changes. It updates the board and optional task entry atomically.")
+def task_status_set(board_id: int, task: str, phase: str, status: str | None = None, entry_id: int | None = None,
+                    entry_title_prefix: str = "Phase 2 task", dry_run: bool = False, ctx: Context | None = None) -> dict:
+    def work():
+        with connection() as conn:
+            return set_task_status(conn, board_id, task, phase, status=status, entry_id=entry_id,
+                                   entry_title_prefix=entry_title_prefix, dry_run=dry_run)
+    return _call("task_status_set", {"board_id": board_id, "task": task, "entry_id": entry_id, "dry_run": dry_run}, work, ctx)
+
+
+@mcp.tool(description="Return a task board's parsed sections, numbered entries, phases, and status date.")
+def task_board(board_id: int, ctx: Context | None = None) -> dict:
+    return _call("task_board", {"board_id": board_id}, lambda: _task_board(board_id), ctx)
+
+
+def _task_board(board_id: int) -> dict:
+    with connection() as conn:
+        return read_task_board(conn, board_id)
 
 
 @mcp.tool(description="Delete a memory only when it is obsolete, duplicate, or incorrect.")
