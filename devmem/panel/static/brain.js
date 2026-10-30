@@ -4,9 +4,9 @@
 
   var U = window.devmem;
   var REDUCED = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  var AGENT_COLORS = { claude: "#fbbf24", "claude-subagent": "#fde68a", codex: "#22d3ee" };
-  var KIND_COLORS = { note: "#60a5fa", decision: "#a78bfa", preference: "#f472b6", snippet: "#34d399", todo: "#fb923c" };
-  var LINK_COLORS = { blocks: "#fb923c", depends_on: "#fbbf24", relates_to: "#94a3b8", overlaps: "#64748b", fixes: "#34d399", supersedes: "#78716c" };
+  var AGENT_COLORS = { claude: "#d6c1a4", "claude-subagent": "#998a75", codex: "#6db0f4" };
+  var KIND_COLORS = { note: "#88a8c9", decision: "#aa9dc5", preference: "#c7959c", snippet: "#90b697", todo: "#ccb484" };
+  var LINK_COLORS = { blocks: "#f47c70", depends_on: "#ccb484", relates_to: "#9c9890", overlaps: "#66635d", fixes: "#90b697", supersedes: "#4a463f" };
   var KIND_ORDER = ["decision", "preference", "note", "snippet", "todo"];
   var STALE_S = 6 * 3600;
   var $ = function (id) { return document.getElementById(id); };
@@ -16,7 +16,7 @@
     agent = String(agent || "");
     if (agent.indexOf("codex") >= 0) return AGENT_COLORS.codex;
     if (agent.indexOf("claude") >= 0) return AGENT_COLORS.claude;
-    return "#c4b5fd";
+    return "#9c9890";
   }
 
   function agentShort(agent) {
@@ -85,11 +85,11 @@
   }
 
   function gaugeColor(left) {
-    if (left === null || left === undefined) return "#4b5578";
-    if (left <= 10) return "#fb7185";
-    if (left <= 25) return "#fb923c";
-    if (left <= 50) return "#fbbf24";
-    return "#22d3ee";
+    if (left === null || left === undefined) return "#66635d";
+    if (left <= 10) return "#f47c70";
+    if (left <= 25) return "#f97c3d";
+    if (left <= 50) return "#ebb25f";
+    return "#cecac3";
   }
 
   function makeGauge(key) {
@@ -125,7 +125,7 @@
       var stale = !l.missing && (l.stale || (l.age_s !== null && l.age_s > STALE_S));
       el.classList.toggle("nodata", !!l.missing);
       el.classList.toggle("stale", !!stale);
-      var color = l.missing || stale ? "#4b5578" : gaugeColor(left);
+      var color = l.missing || stale ? "#66635d" : gaugeColor(left);
       el.style.setProperty("--g", color);
       el.querySelector(".val").setAttribute("stroke-dasharray", (left === null ? 0 : ARC_LEN * Math.max(0, Math.min(100, left)) / 100) + " " + ARC_C);
       el.querySelector(".n").textContent = left === null ? "—" : Math.round(left);
@@ -265,7 +265,7 @@
     $("msgs").innerHTML = items.map(function (x) {
       next[x.id] = 1;
       var fresh = !first && !seen[x.id] && !REDUCED;
-      var color = x.mine ? "var(--violet)" : x.who === "Claude" ? "var(--claude)" : "hsl(" + (x.hue || 0) + " 70% 72%)";
+      var color = x.mine ? "var(--color-user)" : x.who === "Claude" ? "var(--color-claude)" : "oklch(78% 0.07 " + (x.hue || 0) + ")";
       var href = x.chat ? "/messages?chat=" + encodeURIComponent(x.chat) : "/messages/thread/" + x.thread_id;
       return '<li class="mb' + (x.mine ? " mine" : "") + (x.unread ? " unread" : "") + (fresh ? " enter" : "") + '" style="--c:' + color + '">' +
         '<a href="' + href + '"><span class="m-line">' + esc((x.icon || "✉") + " " + (x.headline || x.text || x.line)) + "</span>" +
@@ -343,24 +343,24 @@
       paths.forEach(function (p, i) {
         var h = G.hemis[i];
         var g = c.createRadialGradient(h.x, h.y - G.ry * 0.2, G.ry * 0.1, h.x, h.y, G.ry * 1.1);
-        g.addColorStop(0, "rgba(90,80,200,0.10)");
-        g.addColorStop(1, "rgba(30,40,110,0.03)");
+        g.addColorStop(0, "rgba(239,235,228,0.025)");
+        g.addColorStop(1, "rgba(239,235,228,0.005)");
         c.fillStyle = g;
         c.fill(p);
       });
       // soft glow outline (shadowBlur only here, rendered once per resize)
       c.lineWidth = 1.6;
-      c.strokeStyle = "rgba(160,150,255,0.55)";
-      c.shadowColor = "rgba(140,120,255,0.9)";
+      c.strokeStyle = "rgba(239,235,228,0.22)";
+      c.shadowColor = "rgba(0,0,0,0)";
       c.shadowBlur = 22 * G.s + 6;
       paths.forEach(function (p) { c.stroke(p); });
       c.shadowBlur = 0;
-      c.strokeStyle = "rgba(200,190,255,0.25)";
+      c.strokeStyle = "rgba(239,235,228,0.10)";
       c.lineWidth = 1;
       paths.forEach(function (p) { c.stroke(p); });
       // gyri: faint curved strokes inside each hemisphere
       var rnd = mulberry(7);
-      c.strokeStyle = "rgba(150,140,255,0.07)";
+      c.strokeStyle = "rgba(239,235,228,0.04)";
       c.lineWidth = 1.2;
       G.hemis.forEach(function (h) {
         for (var k = 0; k < 16; k++) {
@@ -374,7 +374,7 @@
         }
       });
       // longitudinal fissure
-      c.strokeStyle = "rgba(160,150,255,0.12)";
+      c.strokeStyle = "rgba(239,235,228,0.07)";
       c.beginPath();
       c.moveTo(G.cx, G.cy - G.ry * 0.92);
       c.bezierCurveTo(G.cx - 6, G.cy - G.ry * 0.3, G.cx + 6, G.cy + G.ry * 0.3, G.cx, G.cy + G.ry * 0.92);
@@ -514,7 +514,7 @@
         next.push(n); byId[id] = n;
         return n;
       }
-      keep("__brain__", { type: "hub", r: 16 * G.s + 5, name: "Brain", color: "#e9d5ff" });
+      keep("__brain__", { type: "hub", r: 16 * G.s + 5, name: "Brain", color: "#efebe4" });
       (g.projects || []).forEach(function (p) {
         keep("p:" + p.id, { type: "project", project: p.id, name: p.name, path: p.path, memories: p.memories, activity: p.activity,
           r: Math.min(16, 6 + Math.sqrt(p.memories || 0) * 1.3) * G.s + 3 });
@@ -522,7 +522,7 @@
       (g.memories || []).forEach(function (m) {
         var isNew = !old["m:" + m.id] && !firstGraph;
         var n = keep("m:" + m.id, { type: "memory", mid: m.id, title: m.title, kind: m.kind, cluster: m.cluster, project: m.project,
-          r: 2.6 * G.s + 1, color: KIND_COLORS[m.kind] || "#94a3b8" });
+          r: 2.6 * G.s + 1, color: KIND_COLORS[m.kind] || "#9c9890" });
         if (isNew || pendingBloom[m.id]) { n.bloom = now; delete pendingBloom[m.id]; }
       });
       (g.agents || []).forEach(function (a) {
@@ -642,7 +642,7 @@
 
       // synapses: project -> memories
       ctx.lineWidth = 0.7;
-      ctx.strokeStyle = "rgba(150,160,255,0.075)";
+      ctx.strokeStyle = "rgba(239,235,228,0.06)";
       ctx.beginPath();
       for (var i = 0; i < memLinks.length; i++) {
         var l = memLinks[i], s = typeof l.source === "object" ? l.source : nodeById[l.source], d = typeof l.target === "object" ? l.target : nodeById[l.target];
@@ -655,7 +655,7 @@
         if (l.kind !== "ml") return;
         var s = typeof l.source === "object" ? l.source : nodeById[l.source], d = typeof l.target === "object" ? l.target : nodeById[l.target];
         if (!s || !d || s.x === undefined || d.x === undefined) return;
-        var color = LINK_COLORS[l.type] || "#94a3b8";
+        var color = LINK_COLORS[l.type] || "#9c9890";
         ctx.strokeStyle = color + "66"; ctx.lineWidth = 0.65;
         ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(d.x, d.y); ctx.stroke();
         if (!REDUCED && /^(blocks|depends_on|supersedes)$/.test(l.type)) {
@@ -676,7 +676,7 @@
       });
       projectLinks.forEach(function (l) {
         var pts = curvePoints(l.source, l.target);
-        ctx.strokeStyle = "rgba(190,170,255,0.28)";
+        ctx.strokeStyle = "rgba(239,235,228,0.18)";
         ctx.lineWidth = 1;
         ctx.beginPath();
         ctx.moveTo(pts[0][0], pts[0][1]);
@@ -725,16 +725,16 @@
         var hl = hf < 1 ? 1 - hf : 0;
         ctx.globalAlpha = 0.9 + hl * 0.1;
         var hs = hub.r * (6.8 + hl * 4);
-        ctx.drawImage(sprite("#c4b5fd"), hub.x - hs / 2, hub.y - hs / 2, hs, hs);
+        ctx.drawImage(sprite("#3a3631"), hub.x - hs / 2, hub.y - hs / 2, hs, hs);
         ctx.globalAlpha = 1;
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = "#efebe4";
         ctx.beginPath(); ctx.arc(hub.x, hub.y, hub.r * 0.48, 0, Math.PI * 2); ctx.fill();
-        ctx.font = "700 " + Math.max(11, fs - 1) + "px " + FONT;
+        ctx.font = "500 " + Math.max(11, fs - 1) + "px " + FONT;
         ctx.textAlign = "center";
         var hubLabel = "Brain", hubW = ctx.measureText(hubLabel).width;
-        ctx.fillStyle = "rgba(5,8,20,0.62)";
+        ctx.fillStyle = "rgba(3,2,1,0.78)";
         ctx.fillRect(hub.x - hubW / 2 - 5, hub.y + hub.r + 5, hubW + 10, fs + 4);
-        ctx.fillStyle = "#fff";
+        ctx.fillStyle = "#efebe4";
         ctx.fillText(hubLabel, hub.x, hub.y + hub.r + 7);
       }
 
@@ -764,7 +764,7 @@
       var fs = Math.max(11, Math.min(17, 15 * G.s + 4));
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
-      ctx.font = "600 " + fs + "px " + FONT;
+      ctx.font = "500 " + fs + "px " + FONT;
       nodes.forEach(function (n) {
         if (n.type !== "project" || n.x === undefined) return;
         var f = flashes[n.id] ? (now - flashes[n.id]) / 1400 : 1;
@@ -773,28 +773,28 @@
         var breathe = REDUCED ? 0 : 0.08 * Math.sin(t * 0.8 + n.phase);
         var gs = n.r * (4.2 + breathe + fl * 4);
         ctx.globalAlpha = 0.55 + fl * 0.45;
-        ctx.drawImage(sprite(n.id === "p:other" ? "#64748b" : "#8b5cf6"), n.x - gs / 2, n.y - gs / 2, gs, gs);
+        ctx.drawImage(sprite(n.id === "p:other" ? "#24211c" : "#3a3631"), n.x - gs / 2, n.y - gs / 2, gs, gs);
         if (fl) {
           ctx.globalAlpha = fl;
           var fs2 = gs * 1.3;
-          ctx.drawImage(sprite("#e9d5ff"), n.x - fs2 / 2, n.y - fs2 / 2, fs2, fs2);
-          ctx.strokeStyle = "rgba(233,213,255," + fl + ")";
+          ctx.drawImage(sprite("#5c3a22"), n.x - fs2 / 2, n.y - fs2 / 2, fs2, fs2);
+          ctx.strokeStyle = "rgba(249,124,61," + fl + ")";
           ctx.lineWidth = 1.5;
           ctx.beginPath(); ctx.arc(n.x, n.y, n.r + (1 - fl) * 40 * G.s, 0, Math.PI * 2); ctx.stroke();
         }
         ctx.globalAlpha = 1;
-        ctx.fillStyle = "#ede9fe";
+        ctx.fillStyle = "#cecac3";
         ctx.beginPath(); ctx.arc(n.x, n.y, n.r * 0.5, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = "rgba(5,8,20,0.55)";
+        ctx.fillStyle = "rgba(3,2,1,0.78)";
         var label = n.name.length > 22 ? n.name.slice(0, 21) + "…" : n.name;
         var tw2 = ctx.measureText(label).width;
         ctx.fillRect(n.x - tw2 / 2 - 5, n.y + n.r + 3, tw2 + 10, fs + 4);
-        ctx.fillStyle = fl ? "#ffffff" : "rgba(230,236,255,0.92)";
+        ctx.fillStyle = fl ? "#f97c3d" : "rgba(206,202,195,0.92)";
         ctx.fillText(label, n.x, n.y + n.r + 5);
       });
 
       // agents (rim)
-      ctx.font = "600 " + Math.max(10, fs - 2) + "px " + FONT;
+      ctx.font = "500 " + Math.max(10, fs - 2) + "px " + FONT;
       nodes.forEach(function (n) {
         if (n.type !== "agent") return;
         var lit = n.lit && now - n.lit < 1200 ? 1 - (now - n.lit) / 1200 : 0;
@@ -804,7 +804,7 @@
         ctx.globalAlpha = n.active || n.connected ? 0.9 : 0.45;
         ctx.drawImage(sprite(n.color), n.x - as / 2, n.y - as / 2, as, as);
         ctx.globalAlpha = 1;
-        ctx.fillStyle = n.active || lit ? "#fff" : n.color;
+        ctx.fillStyle = n.active || lit ? "#efebe4" : n.color;
         ctx.beginPath(); ctx.arc(n.x, n.y, n.r * 0.6, 0, Math.PI * 2); ctx.fill();
         if (n.connected) {
           ctx.strokeStyle = n.color + "99"; ctx.lineWidth = 1;
@@ -822,7 +822,7 @@
     }
 
     function drawHover(n) {
-      ctx.strokeStyle = "rgba(255,255,255,0.8)";
+      ctx.strokeStyle = "rgba(239,235,228,0.8)";
       ctx.lineWidth = 1.2;
       ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 4, 0, Math.PI * 2); ctx.stroke();
     }
@@ -918,9 +918,9 @@
 
   // Glow is owned by brain3d.js; show the saved state even before (or without) the 3D view starting.
   (function () {
-    var glow = $("glow-toggle"), on = true;
+    var glow = $("glow-toggle"), on = false;
     if (!glow) return;
-    try { on = localStorage.getItem("devmem.glow") !== "0"; } catch (e) { /* default on */ }
+    try { on = localStorage.getItem("devmem.bloom") === "1"; } catch (e) { /* default off */ }
     glow.classList.toggle("on", on);
     glow.setAttribute("aria-pressed", on ? "true" : "false");
     glow.textContent = on ? "● Glow on" : "○ Glow off";

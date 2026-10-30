@@ -4,6 +4,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import secrets
 import threading
 import time
@@ -37,6 +38,33 @@ def asset(path: str) -> str:
 
 
 templates.env.globals["asset"] = asset
+
+
+def when(value, seconds: bool = False) -> str:
+    """An ISO timestamp as local time with its zone ("30 Oct 07:36 CET"); anything else is shown as given."""
+    if not value or not isinstance(value, str): return value or ""
+    text = re.sub(r"(\.\d{6})\d+", r"\1", value.strip()).replace("Z", "+00:00")
+    try: parsed = datetime.fromisoformat(text)
+    except ValueError: return value
+    if "T" not in text and " " not in text: return f"{parsed.day} {parsed:%b %Y}"
+    if parsed.tzinfo is None: parsed = parsed.replace(tzinfo=UTC)
+    local = parsed.astimezone()
+    return f"{local.day} {local:%b %H:%M{':%S' if seconds else ''} %Z}"
+
+
+def window_label(limit) -> str:
+    """A usage-limit window named the way the Brain gauges name it: 5h, weekly, weekly opus, 2d."""
+    label, minutes = limit.get("label") or "", limit.get("window_minutes")
+    named = {"five_hour": "5h", "seven_day": "weekly"}
+    if label in named: return named[label]
+    if label.startswith("seven_day_"): return "weekly " + label.removeprefix("seven_day_").replace("_", " ")
+    base = "5h" if minutes == 300 else "weekly" if minutes == 10080 else (f"{minutes // 1440}d" if minutes % 1440 == 0 else f"{round(minutes / 60)}h") if minutes else label
+    prefix = label.split(":")[0] + " " if ":" in label[1:] else ""
+    return prefix + base
+
+
+templates.env.filters["when"] = when
+templates.env.filters["window_label"] = window_label
 log = logging.getLogger("devmem.panel")
 
 INGEST_EVERY_S = 5

@@ -48,24 +48,24 @@
       var t = 0; for (var k in r.series) t += r.series[k]; max = Math.max(max, t);
     });
     var bw = (w - pad) / Math.max(rows.length, 1);
-    var parts = ['<line x1="' + pad + '" y1="' + (h - 18) + '" x2="' + w + '" y2="' + (h - 18) + '" stroke="rgba(120,150,255,.25)"/>',
-      '<text x="0" y="12" fill="#8a96bd" font-size="11">' + fmtTokens(max) + "</text>"];
+    var parts = ['<line x1="' + pad + '" y1="' + (h - 18) + '" x2="' + w + '" y2="' + (h - 18) + '" stroke="#24211c"/>',
+      '<text x="0" y="12" fill="#9c9890" font-size="11">' + fmtTokens(max) + "</text>"];
     rows.forEach(function (r, i) {
       var y = h - 18;
       Object.keys(r.series).forEach(function (k) {
         var bh = (r.series[k] / max) * (h - 36);
         y -= bh;
         parts.push('<rect x="' + (pad + i * bw + 1) + '" y="' + y + '" width="' + Math.max(1, bw - 3) + '" height="' + bh +
-          '" rx="2" fill="' + (colors[k] || "#a78bfa") + '"><title>' + r.x + " " + k + ": " + fmtTokens(r.series[k]) + "</title></rect>");
+          '" rx="0" fill="' + (colors[k] || "#9c9890") + '"><title>' + r.x + " " + k + ": " + fmtTokens(r.series[k]) + "</title></rect>");
       });
       if (rows.length < 16 || i % Math.ceil(rows.length / 10) === 0)
-        parts.push('<text x="' + (pad + i * bw) + '" y="' + (h - 4) + '" fill="#8a96bd" font-size="10">' + String(r.x).slice(5) + "</text>");
+        parts.push('<text x="' + (pad + i * bw) + '" y="' + (h - 4) + '" fill="#66635d" font-size="10">' + String(r.x).slice(5) + "</text>");
     });
     svg.setAttribute("viewBox", "0 0 " + w + " " + h);
     svg.innerHTML = parts.join("");
   }
 
-  var AGENT_COLORS = { claude: "#fbbf24", "claude-subagent": "#fde68a", codex: "#22d3ee" };
+  var AGENT_COLORS = { claude: "#d6c1a4", "claude-subagent": "#998a75", codex: "#6db0f4" };
   var byId = function (id) { return document.getElementById(id); };
 
   function agentColor(agent) {
@@ -73,7 +73,7 @@
     agent = String(agent || "");
     if (agent.indexOf("codex") >= 0) return AGENT_COLORS.codex;
     if (agent.indexOf("claude") >= 0) return AGENT_COLORS.claude;
-    return "#c4b5fd";
+    return "#9c9890";
   }
 
   function agentShort(agent) {
@@ -105,18 +105,18 @@
     var max = 1;
     agents.forEach(function (a) { series[a].forEach(function (v) { max = Math.max(max, v); }); });
     var step = w / 23, out = [];
-    out.push('<line x1="0" y1="' + (h - 1) + '" x2="' + w + '" y2="' + (h - 1) + '" stroke="rgba(120,150,255,.18)"/>');
+    out.push('<line x1="0" y1="' + (h - 1) + '" x2="' + w + '" y2="' + (h - 1) + '" stroke="#24211c"/>');
     agents.forEach(function (a, idx) {
       var c = agentColor(a);
       var pts = series[a].map(function (v, i) { return [i * step, h - 3 - (v / max) * (h - 10)]; });
       var line = pts.map(function (p) { return p[0].toFixed(1) + "," + p[1].toFixed(1); }).join(" ");
-      out.push('<defs><linearGradient id="sg' + idx + '" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="' + c + '" stop-opacity=".35"/>' +
+      out.push('<defs><linearGradient id="sg' + idx + '" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="' + c + '" stop-opacity=".14"/>' +
         '<stop offset="1" stop-color="' + c + '" stop-opacity="0"/></linearGradient></defs>');
       out.push('<polygon points="0,' + h + " " + line + " " + w + "," + h + '" fill="url(#sg' + idx + ')"/>');
-      out.push('<polyline points="' + line + '" fill="none" stroke="' + c + '" stroke-width="1.8" stroke-linejoin="round"/>');
+      out.push('<polyline points="' + line + '" fill="none" stroke="' + c + '" stroke-width="1.25" stroke-linejoin="miter"/>');
     });
-    out.push('<text x="2" y="11" fill="#56618a" font-size="10">' + fmtTokens(max) + "/h</text>");
-    if (!agents.length) out.push('<text x="' + w / 2 + '" y="' + h / 2 + '" fill="#56618a" font-size="12" text-anchor="middle">no usage in 24 h</text>');
+    out.push('<text x="2" y="11" fill="#66635d" font-size="10">' + fmtTokens(max) + "/h</text>");
+    if (!agents.length) out.push('<text x="' + w / 2 + '" y="' + h / 2 + '" fill="#66635d" font-size="12" text-anchor="middle">no usage in 24 h</text>');
     svg.innerHTML = out.join("");
   }
 

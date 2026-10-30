@@ -20,10 +20,10 @@
   }
 
   function color(member) {
-    if (!member) return "var(--muted)";
-    if (member.kind === "user") return "var(--violet)";
-    if (member.kind === "claude") return "var(--claude)";
-    return "hsl(" + (member.hue || 0) + " 70% 72%)";
+    if (!member) return "var(--color-muted)";
+    if (member.kind === "user") return "var(--color-user)";
+    if (member.kind === "claude") return "var(--color-claude)";
+    return "oklch(78% 0.07 " + (member.hue || 0) + ")";
   }
 
   function member(key) {
@@ -133,12 +133,17 @@
     }
   }
 
+  // Title and state parts show as columns parted by a hairline.
+  function parts(list, whole) {
+    return (list && list.length ? list : [whole || ""]).map(function (p) { return '<span class="part">' + esc(p) + "</span>"; }).join("");
+  }
+
   function rowHtml(c) {
     var on = chat && chat.key === c.key;
     return '<li class="chat-row' + (on ? " on" : "") + '"><a href="/messages?chat=' + encodeURIComponent(c.key) + filters + '">' +
       '<span class="avatar k-' + esc(c.kind) + '" style="--h:' + c.hue + '">' + esc(c.kind === "c" ? "#" : (c.title || "?").charAt(0).toUpperCase()) + "</span>" +
-      '<span class="cr-main"><span class="cr-top"><b class="cr-title">' + esc(c.title) + '</b><time data-rel datetime="' + esc(c.last_at) + '">' + U.relTime(c.last_at) + "</time></span>" +
-      '<span class="cr-bottom"><span class="cr-preview">' + (c.running ? '<span class="cr-live" title="agents still working">●</span> ' : "") + esc(c.state || "") + "</span>" +
+      '<span class="cr-main"><span class="cr-top"><b class="cr-title">' + parts(c.title_parts, c.title) + '</b><time data-rel datetime="' + esc(c.last_at) + '">' + U.relTime(c.last_at) + "</time></span>" +
+      '<span class="cr-bottom"><span class="cr-preview">' + (c.running ? '<span class="cr-live" title="agents still working">●</span> ' : "") + parts(c.state_parts, c.state) + "</span>" +
       (c.unread && !on ? '<span class="msg-badge" title="unread">' + c.unread + "</span>" : "") + "</span><span class=\"cr-preview\">" + esc(c.headline || c.preview) + "</span></span></a></li>";
   }
 

@@ -825,3 +825,15 @@ def test_v10_database_migrates_to_v11_with_codex_columns(tmp_path, monkeypatch):
     assert migrated.execute("SELECT version FROM schema_version").fetchone()[0] == 12
     assert {"agent_kind", "model", "handoff_id", "handoff_session_id"} <= {row[1] for row in migrated.execute("PRAGMA table_info(subagents)")}
     assert list((tmp_path / "backups").glob("devmem-before-v12-from-v10-*.db"))
+
+
+def test_chat_title_and_state_come_as_parts_and_keep_a_dot_inside_a_subject():
+    client = _client()
+    _post("body", kind="question", to="user", sender="worker", project="/work/demo", subject="Ship it · now?")
+    with connection() as conn:
+        row = messages.chats(conn)[0]
+        assert row["title_parts"] == ["Ship it · now?"] and row["title"] == "Ship it · now?"
+        assert row["state_parts"] == ["1 thread", "1 question for you"] and row["state"] == " · ".join(row["state_parts"])
+        assert messages.chat(conn, row["key"])["title_parts"] == ["Ship it · now?"]
+    page = client.get("/messages", params={"chat": row["key"]}).text
+    assert '<span class="part">Ship it · now?</span>' in page

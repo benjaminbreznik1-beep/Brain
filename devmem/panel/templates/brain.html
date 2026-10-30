@@ -7,7 +7,7 @@
 {% block topbar_extra %}
   <span class="clock" id="clock">--:--</span>
   <button class="ghost" id="dim-toggle" type="button" title="Switch between the 3D web and the 2D brain"><span class="seg">2D</span><span class="seg active">3D</span></button>
-  <button class="ghost" id="glow-toggle" type="button" title="Toggle 3D bloom glow (3D view only)" aria-pressed="true">● Glow on</button>
+  <button class="ghost" id="glow-toggle" type="button" title="Toggle 3D bloom glow (3D view only)" aria-pressed="false">○ Glow off</button>
   <button class="ghost" id="wall-toggle" type="button" title="Wall mode: hide navigation (key W)">Wall mode</button>
 {% endblock %}
 {% block main %}
@@ -38,15 +38,15 @@
       <div class="brain3d" id="brain3d" hidden aria-label="Live memory and agent network, 3D"></div>
       <div class="brain-tip" id="brain-tip" hidden></div>
       <div class="brain-legend">
-        <span><i style="--c:var(--claude)"></i>Claude</span>
-        <span><i style="--c:var(--subagent)"></i>subagent</span>
-        <span><i style="--c:var(--codex)"></i>Codex</span>
-        <span class="sep"></span>
-        <span><i style="--c:var(--blue)"></i>note</span>
-        <span><i style="--c:var(--violet)"></i>decision</span>
-        <span><i style="--c:var(--pink)"></i>preference</span>
-        <span><i style="--c:var(--green)"></i>snippet</span>
-        <span><i style="--c:var(--orange)"></i>todo</span>
+        <span><i style="--c:var(--color-claude)"></i>Claude</span>
+        <span><i style="--c:var(--color-subagent)"></i>subagent</span>
+        <span><i style="--c:var(--color-codex)"></i>Codex</span>
+        <span class="sep" aria-hidden="true"></span>
+        <span><i style="--c:var(--kind-note)"></i>note</span>
+        <span><i style="--c:var(--kind-decision)"></i>decision</span>
+        <span><i style="--c:var(--kind-preference)"></i>preference</span>
+        <span><i style="--c:var(--kind-snippet)"></i>snippet</span>
+        <span><i style="--c:var(--kind-todo)"></i>todo</span>
       </div>
     </div>
     <div class="panel panel-messages">

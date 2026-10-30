@@ -526,14 +526,16 @@ def chat(conn, key: str) -> dict[str, Any] | None:
                           "agent_id": a["agent_id"], "icon": "▶", "headline": _cut(f"{name}: working — {tool}"),
                           "text": "\n".join(t["name"] + (" " + t["arg"] if t["arg"] else "") for t in tool_rows)})
     headlines.sort(key=lambda item: parse_ts(item["at"]) or _EPOCH)
-    title, project = _chat_title(conn, key, roots, thread_ids, agents)
+    title_parts, project = _chat_title_parts(conn, key, roots, thread_ids, agents)
+    title = " · ".join(title_parts)
     statuses = {m["thread_status"] for m in items_m if m["id"] == m["thread_id"]}
-    return {"key": key, "kind": kind, "title": title, "project": project, "members": members, "items": out, "headlines": headlines, "thread_ids": thread_ids,
+    return {"key": key, "kind": kind, "title": title, "title_parts": title_parts, "project": project, "members": members, "items": out, "headlines": headlines, "thread_ids": thread_ids,
             "status": "open" if "open" in statuses else (statuses.pop() if len(statuses) == 1 else "mixed" if statuses else None),
             "target": _target_from(out, items_m, by_id, members)}
 
 
-def _chat_title(conn, key: str, roots, thread_ids, agents) -> tuple[str, str | None]:
+def _chat_title_parts(conn, key: str, roots, thread_ids, agents) -> tuple[list[str], str | None]:
+    """The chat title as separate parts, so the panel can lay them out without re-splitting text."""
     kind, _, ident = key.partition(":")
     mine = [r for r in roots if r["id"] in thread_ids]
     project = next((r["project"] for r in mine if r["project"]), None) or next((a["project"] for a in agents if a["project"]), None)
@@ -541,15 +543,15 @@ def _chat_title(conn, key: str, roots, thread_ids, agents) -> tuple[str, str | N
         if not project:
             row = conn.execute("SELECT project FROM usage_events WHERE session_id=? AND project IS NOT NULL LIMIT 1", (ident,)).fetchone()
             project = row[0] if row else None
-        return (Path(project).name if project else "Session") + " · " + ident[:8], project
+        return [Path(project).name if project else "Session", ident[:8]], project
     if kind == "d":
         agent = next(iter(agents), None) or conn.execute("SELECT * FROM subagents WHERE agent_id=?", (ident,)).fetchone()
         agent = dict(agent) if agent else {}
         project = agent.get("project") or project
-        return "Codex · " + (Path(project).name if project else "Project") + " · " + first_line({"body": agent.get("task") or ""}, 80), project
-    if kind == "c": return ident, project
+        return ["Codex", Path(project).name if project else "Project", first_line({"body": agent.get("task") or ""}, 80)], project
+    if kind == "c": return [ident], project
     root = mine[0] if mine else {}
-    return first_line(root, 80) if root else f"Thread {ident}", project
+    return [first_line(root, 80) if root else f"Thread {ident}"], project
 
 
 def _target_from(items, items_m, by_id, members) -> dict[str, Any] | None:
@@ -614,9 +616,11 @@ def chats(conn, project: str = "", agent: str = "", kind: str = "", status: str 
             if done: parts.append(f"{done} done")
             if working: parts.append(f"{working} working")
             if unanswered: parts.append(f"{unanswered} question for you")
-            c["state"] = " · ".join(parts)
-        else: c["state"] = "1 thread" + (f" · {unanswered} question for you" if unanswered else "")
-        c["title"], c["project"] = _chat_title(conn, c["key"], _roots(conn, c["threads"]), c["threads"], [])
+            c["state_parts"] = parts
+        else: c["state_parts"] = ["1 thread"] + ([f"{unanswered} question for you"] if unanswered else [])
+        c["state"] = " · ".join(c["state_parts"])
+        c["title_parts"], c["project"] = _chat_title_parts(conn, c["key"], _roots(conn, c["threads"]), c["threads"], [])
+        c["title"] = " · ".join(c["title_parts"])
         c["hue"] = hue(c["title"])
         out.append(c)
     out.sort(key=lambda c: parse_ts(c["last_at"]) or _EPOCH, reverse=True)

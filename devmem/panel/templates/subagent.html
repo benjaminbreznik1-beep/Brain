@@ -2,11 +2,11 @@
 {% block title %}Subagent · Brain{% endblock %}
 {% block body %}
 <h1>{{ agent.agent_type or 'subagent' }}</h1>
-<p class="muted">{% if agent.thread_id %}<a href="/messages?chat={{ ('s:' ~ agent.session_id) | urlencode }}">← chat</a> · <a href="/messages/thread/{{ agent.thread_id }}">thread</a> · {% endif %}{{ agent.description or '' }}</p>
+<p class="muted back-row">{% if agent.thread_id %}<a href="/messages?chat={{ ('s:' ~ agent.session_id) | urlencode }}">Back to chat</a><a href="/messages/thread/{{ agent.thread_id }}">Thread</a>{% endif %}<span>{{ agent.description or '' }}</span></p>
 <div class="grid-cards">
   <div class="card"><div class="stat-label">Status</div><div class="stat-value"><span class="badge st-{{ agent.status }}">{{ agent.status }}</span></div></div>
   <div class="card"><div class="stat-label">Started</div><div><time data-rel datetime="{{ agent.started_at }}">{{ agent.started_at }}</time></div>
-    <div class="stat-label" style="margin-top:.5rem">Last activity</div><div><time data-rel datetime="{{ agent.last_activity_at }}">{{ agent.last_activity_at }}</time></div></div>
+    <div class="stat-label stat-gap">Last activity</div><div><time data-rel datetime="{{ agent.last_activity_at }}">{{ agent.last_activity_at }}</time></div></div>
   <div class="card"><div class="stat-label">Tokens</div><div class="stat-value" data-tokens="{{ agent.tokens }}">{{ agent.tokens }}</div></div>
   <div class="card"><div class="stat-label">Parent session</div><div class="mono"><a href="/sessions/{{ agent.session_id }}">{{ agent.session_id }}</a></div>
     {% if agent.project %}<div class="muted mono">{{ agent.project }}</div>{% endif %}</div>

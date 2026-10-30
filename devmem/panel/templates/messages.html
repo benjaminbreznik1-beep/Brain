@@ -2,6 +2,7 @@
 {% block title %}Messages · Brain{% endblock %}
 {% block body_class %}chat-body{% endblock %}
 {% block main %}
+{% macro parts(items) %}{% for p in items %}<span class="part">{{ p }}</span>{% endfor %}{% endmacro %}
 {% set qs = [] %}
 {% for name in ('project', 'agent', 'kind', 'status') %}{% if filters[name] %}{% set _ = qs.append(name ~ '=' ~ (filters[name] | urlencode)) %}{% endif %}{% endfor %}
 {% if filters.question %}{% set _ = qs.append('question=1') %}{% endif %}
@@ -11,14 +12,14 @@
     <div class="chat-list-head">
       <h1>Messages</h1>
       <details class="chat-filters"{% if filter_qs %} open{% endif %}>
-        <summary>Filter{% if filter_qs %} · on{% endif %}</summary>
+        <summary>Filter{% if filter_qs %}, on{% endif %}</summary>
         <form method="get" class="msg-filters">
           <select name="project"><option value="">All projects</option>{% for p in facets.projects %}<option value="{{ p }}" {% if filters.project == p %}selected{% endif %}>{{ p }}</option>{% endfor %}</select>
           <select name="agent"><option value="">All agents</option>{% for a in facets.agents %}<option value="{{ a }}" {% if filters.agent == a %}selected{% endif %}>{{ a }}</option>{% endfor %}</select>
           <select name="kind"><option value="">All kinds</option>{% for k in kinds %}<option {% if filters.kind == k %}selected{% endif %}>{{ k }}</option>{% endfor %}</select>
           <select name="status"><option value="">Any status</option>{% for st in ('open', 'answered', 'closed') %}<option {% if filters.status == st %}selected{% endif %}>{{ st }}</option>{% endfor %}</select>
           <label class="muted"><input type="checkbox" name="question" value="1" {% if filters.question %}checked{% endif %}> with a question</label>
-          <button>Apply</button>{% if filter_qs %} <a href="/messages">clear</a>{% endif %}
+          <button>Apply</button>{% if filter_qs %} <a href="/messages">Clear filters</a>{% endif %}
         </form>
       </details>
     </div>
@@ -28,8 +29,8 @@
         <a href="/messages?chat={{ c.key | urlencode }}{{ filter_qs }}">
           <span class="avatar k-{{ c.kind }}" style="--h:{{ c.hue }}">{{ '#' if c.kind == 'c' else (c.title[:1] | upper) }}</span>
           <span class="cr-main">
-            <span class="cr-top"><b class="cr-title">{{ c.title }}</b><time data-rel datetime="{{ c.last_at }}">{{ c.last_at }}</time></span>
-            <span class="cr-bottom"><span class="cr-preview">{% if c.running %}<span class="cr-live" title="agents still working">●</span> {% endif %}{{ c.state }}</span>{% if c.unread %}<span class="msg-badge" title="unread">{{ c.unread }}</span>{% endif %}</span>
+            <span class="cr-top"><b class="cr-title">{{ parts(c.title_parts or [c.title]) }}</b><time data-rel datetime="{{ c.last_at }}">{{ c.last_at }}</time></span>
+            <span class="cr-bottom"><span class="cr-preview">{% if c.running %}<span class="cr-live" title="agents still working">●</span> {% endif %}{{ parts(c.state_parts or [c.state]) }}</span>{% if c.unread %}<span class="msg-badge" title="unread">{{ c.unread }}</span>{% endif %}</span>
             <span class="cr-preview">{{ c.headline }}</span>
           </span>
         </a>
@@ -44,7 +45,7 @@
     <header class="chat-head">
       <a class="chat-back" href="/messages{{ ('?' ~ filter_qs[1:]) if filter_qs else '' }}" aria-label="Back to chats">←</a>
       <div class="ch-main">
-        <b class="ch-title">{{ chat.title }}</b>
+        <b class="ch-title">{{ parts(chat.title_parts or [chat.title]) }}</b>
         <div class="ch-members" id="chat-members">{% for key, m in chat.members.items() %}<span class="chip">{{ m.name }}</span>{% endfor %}</div>
       </div>
       <button type="button" id="headline-toggle" class="ghost">Headlines</button>

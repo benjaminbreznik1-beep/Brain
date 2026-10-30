@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}Thread · Brain{% endblock %}
 {% macro tools(agent, open=False) %}
-<details class="tool-lines"{% if open %} open{% endif %}><summary>{{ agent.tools | length }} tool calls · {{ agent.status }}{% if agent.tokens %} · <span data-tokens="{{ agent.tokens }}">{{ agent.tokens }}</span> tokens{% endif %}</summary>
+<details class="tool-lines"{% if open %} open{% endif %}><summary><span class="meta"><span>{{ agent.tools | length }} tool calls</span><span>{{ agent.status }}</span>{% if agent.tokens %}<span><span data-tokens="{{ agent.tokens }}">{{ agent.tokens }}</span> tokens</span>{% endif %}</span></summary>
 <ol>{% for t in agent.tools %}<li><span class="mono tool">{{ t.name }}</span> <span class="muted">{{ t.arg }}</span></li>{% else %}<li class="muted">No tool calls yet.</li>{% endfor %}</ol></details>
 {% endmacro %}
 {% block body %}
@@ -16,7 +16,7 @@
     {% endif %}
   </div>
 </div>
-<p class="muted"><a href="/messages{% if chat_key %}?chat={{ chat_key | urlencode }}{% endif %}">← chat</a>{% if root.project %} · <span class="mono">{{ root.project }}</span>{% endif %}</p>
+<p class="muted back-row"><a href="/messages{% if chat_key %}?chat={{ chat_key | urlencode }}{% endif %}">Back to chat</a>{% if root.project %}<span class="mono">{{ root.project }}</span>{% endif %}</p>
 
 {% for m in items %}
 <article class="card msg msg-{{ m.kind }}">
@@ -28,7 +28,7 @@
   </header>
   {% set agent = agents.get(m.agent_id) if m.agent_id else None %}
   {% if agent and m.id == agent.spawn_msg_id %}
-    <p><b>Agent started</b> · <a href="/messages/agent/{{ agent.agent_id }}">{{ agent.agent_type or 'subagent' }}</a>{% if agent.description %} · {{ agent.description }}{% endif %}</p>
+    <p class="meta"><b>Agent started</b><a href="/messages/agent/{{ agent.agent_id }}">{{ agent.agent_type or 'subagent' }}</a>{% if agent.description %}<span>{{ agent.description }}</span>{% endif %}</p>
     <details><summary>Task</summary><pre class="msg-body">{{ m.body }}</pre></details>
     {{ tools(agent) }}
   {% elif agent and m.id == agent.report_msg_id %}

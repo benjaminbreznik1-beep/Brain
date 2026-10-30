@@ -4,12 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Brain{% endblock %}</title>
+  <meta name="description" content="Live view of devmem: agent activity, messages, memory and usage limits.">
+  <link rel="preconnect" href="https://api.fontshare.com">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://api.fontshare.com/v2/css?f[]=switzer@400,500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400&display=swap">
   <link rel="stylesheet" href="{{ asset('site.css') }}">
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}">
   <header class="topbar">
-    <a class="brand" href="/"><span class="brand-dot"></span>Brain</a>
+    <a class="brand" href="/" aria-label="Brain, home">Brain</a>
     <nav>
       <a href="/" class="{{ 'on' if active == 'brain' }}">Brain</a>
       <a href="/overview" class="{{ 'on' if active == 'overview' }}">Overview</a>
