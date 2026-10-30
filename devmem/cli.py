@@ -9,16 +9,16 @@ import sys
 import subprocess
 from pathlib import Path
 
-from .db import audit_memories, context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, now, project_for_cwd, readonly_connection
+from .db import audit_memories, context_text, connection, db_path, ensure_embeddings, fts_query, hybrid_search, now, project_for_cwd, readonly_connection, task_board, task_status_set
 from .embed import get_embedder
 
 
 _NO_CONTEXT = "No saved project context."
 _HOOK_HEADER = "devmem memory (auto-loaded at session start; use memory_search / memory_get for more):"
 _REMINDER_RULES = (
-    (r"\bgit\s+(switch\s+-c|checkout\s+-b)\b", "New branch started: if this belongs to a tracked task, update its status line in memory (the pinned board and the task's own memory)."),
-    (r"\bgit\s+commit\b", "Commit made: update the task's status in memory (pinned board + task memory) if its phase changed."),
-    (r"\bgit\s+merge\b", "Merge done: mark the task's phase in memory (pinned board + task memory)."),
+    (r"\bgit\s+(switch\s+-c|checkout\s+-b)\b", "New branch started: if this belongs to a tracked task, use task_status_set when its phase changes."),
+    (r"\bgit\s+commit\b", "Commit made: use task_status_set if the tracked task's phase changed."),
+    (r"\bgit\s+merge\b", "Merge done: use task_status_set to mark the tracked task's phase."),
     (r"\bcodex\s+exec\b", "Work dispatched to Codex: record 'dispatched' in the task's memory now and update it again when the result comes back."),
 )
 
@@ -167,6 +167,13 @@ def main() -> None:
     context.add_argument("--hook", action="store_true")
     remind = sub.add_parser("remind")
     remind.add_argument("--hook", action="store_true")
+    board = sub.add_parser("board")
+    board_sub = board.add_subparsers(dest="board_command", required=True)
+    board_show = board_sub.add_parser("show"); board_show.add_argument("board_id", type=int)
+    board_set = board_sub.add_parser("set")
+    board_set.add_argument("board_id", type=int); board_set.add_argument("task")
+    board_set.add_argument("--phase", required=True); board_set.add_argument("--status")
+    board_set.add_argument("--entry-id", type=int); board_set.add_argument("--dry-run", action="store_true")
     maintain = sub.add_parser("maintain")
     maintain.add_argument("--project")
     maintain.add_argument("--dry-run", action="store_true")
@@ -244,6 +251,26 @@ def main() -> None:
             print(f"devmem context: {exc}", file=sys.stderr)
     elif args.command == "remind":
         if args.hook: _remind_hook()
+    elif args.command == "board":
+        with connection() as conn:
+            if args.board_command == "show":
+                result = task_board(conn, args.board_id)
+            else:
+                result = task_status_set(conn, args.board_id, args.task, args.phase, status=args.status,
+                                         entry_id=args.entry_id, dry_run=args.dry_run)
+        if result.get("ok") is False:
+            print(f"devmem board: {result['error']}", file=sys.stderr)
+            raise SystemExit(1)
+        if args.board_command == "show":
+            for entry in result["entries"]:
+                print(f"{entry['section']}\t{entry['n']}\t{entry['task']}\t{entry['title']}\t{entry['phase']}")
+            if result["status_as_of"]: print(f"Status as of {result['status_as_of']}.")
+        else:
+            print(result["board"]["old_line"])
+            print(result["board"]["new_line"])
+            if result["entry"]:
+                print(result["entry"]["old_status"] or "")
+                print(result["entry"]["new_status"])
     elif args.command == "maintain":
         if args.hook:
             if not args.session_end: parser.error("maintain --hook is only for the SessionEnd hook (--session-end --hook)")

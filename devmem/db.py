@@ -111,6 +111,100 @@ def update_memory(conn: sqlite3.Connection, id: int, *, content: str | None = No
     return bool(conn.execute("UPDATE memories SET " + ", ".join(f"{key}=?" for key in fields) + " WHERE id=?", (*fields.values(), id)).rowcount)
 
 
+_BOARD_SECTION = re.compile(r"\b(NOW|NEXT|LATER):")
+_BOARD_ENTRY = re.compile(r"(?<!\S)(?P<n>\d+)\.\s+(?P<task>\S+)(?=\s)")
+_BOARD_STATUS = re.compile(r"\bStatus as of [^.]*\.")
+
+
+def parse_task_board(content: str) -> tuple[list[dict], str | None]:
+    """Parse a board memory without changing its free-text layout."""
+    sections = list(_BOARD_SECTION.finditer(content))
+    entries = list(_BOARD_ENTRY.finditer(content))
+    stops = sorted([*sections, *entries, *_BOARD_STATUS.finditer(content)], key=lambda match: match.start())
+    parsed = []
+    for entry in entries:
+        end = next((marker.start() for marker in stops if marker.start() > entry.start()), len(content))
+        text = content[entry.start():end].strip()
+        body = text[entry.end() - entry.start():].strip()
+        title, separator, phase = body.partition("→ PHASE:")
+        title = title.rstrip()
+        if title.endswith(("—", "-")): title = title[:-1].rstrip()
+        section = next((match.group(1) for match in reversed(sections) if match.start() < entry.start()), "")
+        parsed.append({"section": section, "n": int(entry.group("n")), "task": entry.group("task"),
+                       "title": title, "phase": phase.strip() if separator else "", "_start": entry.start(), "_end": end})
+    status = _BOARD_STATUS.search(content)
+    return parsed, status.group(0)[len("Status as of "):-1] if status else None
+
+
+def task_board(conn: sqlite3.Connection, board_id: int) -> dict:
+    """Return one board's parsed entries and its status date."""
+    row = conn.execute("SELECT content FROM memories WHERE id=?", (board_id,)).fetchone()
+    if not row: return {"ok": False, "error": "board not found"}
+    entries, status_as_of = parse_task_board(row["content"])
+    return {"entries": [{key: value for key, value in entry.items() if not key.startswith("_")} for entry in entries],
+            "status_as_of": status_as_of}
+
+
+def _board_today() -> tuple[str, str]:
+    current = datetime.now(UTC)
+    return f"{current.day} {current:%b %Y}", f"{current.day} {current:%b}"
+
+
+def task_status_set(conn: sqlite3.Connection, board_id: int, task: str, phase: str, *, status: str | None = None,
+                    entry_id: int | None = None, entry_title_prefix: str = "Phase 2 task", dry_run: bool = False) -> dict:
+    """Update a board entry and its optional task memory as one transaction."""
+    from .maintenance import SECRET
+    if not conn.in_transaction: conn.execute("BEGIN IMMEDIATE")
+    conn.execute("SAVEPOINT task_status_set")  # undo only this call's writes, never the caller's open work
+    try:
+        board = conn.execute("SELECT id,content,project FROM memories WHERE id=?", (board_id,)).fetchone()
+        if not board: raise ValueError("board not found")
+        entries, _ = parse_task_board(board["content"])
+        matches = [entry for entry in entries if entry["task"] == task]
+        if len(matches) != 1: raise ValueError(f"expected exactly one board entry for {task}, found {len(matches)}")
+        selected = matches[0]
+        raw = board["content"][selected["_start"]:selected["_end"]]
+        old_line = raw.strip()
+        body = old_line[_BOARD_ENTRY.match(old_line).end():].strip()
+        before, marker, _ = body.partition("→ PHASE:")
+        new_body = before.rstrip() + f" → PHASE: {phase}" if marker else body.rstrip().removesuffix(".") + f" → PHASE: {phase}"
+        new_line = old_line[:_BOARD_ENTRY.match(old_line).end()] + " " + new_body
+        new_board = board["content"][:selected["_start"]] + new_line + raw[len(raw.rstrip()):] + board["content"][selected["_end"]:]
+        today, short_today = _board_today()
+        new_board = _BOARD_STATUS.sub(f"Status as of {today}.", new_board, count=1)
+        entry_result = None
+        entry = None
+        if status is not None:
+            if entry_id is not None:
+                entry = conn.execute("SELECT id,content FROM memories WHERE id=?", (entry_id,)).fetchone()
+                if not entry: raise ValueError("entry memory not found")
+            else:
+                prefix = f"{entry_title_prefix} {task} "
+                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                found = conn.execute(f"SELECT id,content FROM memories m WHERE project IS ? AND title LIKE ? ESCAPE '\\' AND {not_superseded_sql()} ORDER BY id",
+                                     (board["project"], escaped + "%")).fetchall()
+                if len(found) != 1: raise ValueError(f"expected exactly one entry memory for {task}, found {len(found)}")
+                entry = found[0]
+            old_status = entry["content"].split("\n", 1)[0] if entry["content"].startswith("STATUS") else None
+            new_status = f"STATUS ({short_today}): {status}"
+            new_entry = new_status + ("\n" + entry["content"] if old_status is None else entry["content"][len(old_status):])
+            entry_result = {"id": entry["id"], "old_status": old_status, "new_status": new_status}
+        if SECRET.search(phase) or (status is not None and SECRET.search(status)):
+            raise ValueError("secret detected")
+        validate_content(new_board)
+        if entry is not None: validate_content(new_entry)
+        result = {"ok": True, "board": {"id": board_id, "old_line": old_line, "new_line": new_line}, "entry": entry_result}
+        if dry_run:
+            conn.execute("ROLLBACK TO task_status_set"); conn.execute("RELEASE task_status_set"); return result
+        update_memory(conn, board_id, content=new_board)
+        if entry is not None: update_memory(conn, entry["id"], content=new_entry)
+        conn.execute("RELEASE task_status_set"); conn.commit()
+        return result
+    except Exception as exc:
+        conn.execute("ROLLBACK TO task_status_set"); conn.execute("RELEASE task_status_set")
+        return {"ok": False, "error": str(exc)}
+
+
 def validate_review_after(value: str | None) -> str | None:
     """Validate an optional ISO calendar date and return its canonical form."""
     if value is None or value == "":

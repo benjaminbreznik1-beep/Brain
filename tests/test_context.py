@@ -123,7 +123,7 @@ def test_remind_hook_defaults_and_quiet_cases(tmp_path, monkeypatch, capsys):
              ("git merge task", "Merge done:"), ("codex exec task", "Work dispatched to Codex:")]
     for command, message in cases:
         result = _run_cli(monkeypatch, capsys, ["remind", "--hook"], json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/x"}))
-        assert json.loads(result.out)["hookSpecificOutput"]["additionalContext"] == "devmem reminder: " + message + ({"New branch started:": " if this belongs to a tracked task, update its status line in memory (the pinned board and the task's own memory).", "Commit made:": " update the task's status in memory (pinned board + task memory) if its phase changed.", "Merge done:": " mark the task's phase in memory (pinned board + task memory).", "Work dispatched to Codex:": " record 'dispatched' in the task's memory now and update it again when the result comes back."}[message])
+        assert json.loads(result.out)["hookSpecificOutput"]["additionalContext"] == "devmem reminder: " + message + ({"New branch started:": " if this belongs to a tracked task, use task_status_set when its phase changes.", "Commit made:": " use task_status_set if the tracked task's phase changed.", "Merge done:": " use task_status_set to mark the tracked task's phase.", "Work dispatched to Codex:": " record 'dispatched' in the task's memory now and update it again when the result comes back."}[message])
     assert _run_cli(monkeypatch, capsys, ["remind", "--hook"], '{"tool_name":"Read"}').out == ""
     assert _run_cli(monkeypatch, capsys, ["remind", "--hook"], '{"tool_name":"Bash","tool_input":{"command":"ls"}}').out == ""
     assert _run_cli(monkeypatch, capsys, ["remind", "--hook"], "bad").out == ""

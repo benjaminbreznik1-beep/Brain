@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .. import messages as msgs
-from ..db import audit_memories, connection, ensure_embeddings, fts_query, hybrid_search, is_stale, now, validate_content, validate_review_after
+from ..db import audit_memories, connection, ensure_embeddings, fts_query, hybrid_search, is_stale, not_superseded_sql, now, parse_task_board, validate_content, validate_review_after
 from ..embed import get_embedder
 from ..ingest.runner import ingest_all
 from ..ado import AdoClient, AdoError, empty_snapshot
@@ -513,7 +513,12 @@ def overview(request: Request):
       FROM usage_events GROUP BY project ORDER BY tokens DESC LIMIT 10""")
     with connection() as conn:
         limits, tokens = live.limits(conn), live.tokens(conn)
-    return render(request, "overview.html", totals=totals, daily=daily, projects=projects, limits=limits, tokens=tokens)
+        boards = []
+        for row in conn.execute(f"SELECT id,title,content,tags FROM memories m WHERE {not_superseded_sql()}"):
+            if "board" not in re.split(r"[\s,]+", (row["tags"] or "").lower()): continue
+            entries, status_as_of = parse_task_board(row["content"])
+            boards.append({"id": row["id"], "title": row["title"], "entries": entries, "status_as_of": status_as_of})
+    return render(request, "overview.html", totals=totals, daily=daily, projects=projects, limits=limits, tokens=tokens, boards=boards)
 
 
 @app.get("/projects")
@@ -591,6 +596,17 @@ def memory(request: Request, q: str = "", kind: str = ""):
         from ..git_sync import in_scope
         row["synced"] = in_scope(row)
     return render(request, "memory.html", rows=rows, q=q, kind=kind, embedder_status=embedder_status,
+                  counts=_rows("SELECT kind,COUNT(*) count FROM memories GROUP BY kind"))
+
+
+@app.get("/memory/{id}")
+def memory_detail(request: Request, id: int):
+    row = _rows("SELECT * FROM memories WHERE id=?", (id,))
+    if not row: raise HTTPException(404, "memory not found")
+    row[0]["stale"] = is_stale(row[0].get("review_after"))
+    from ..git_sync import in_scope
+    row[0]["synced"] = in_scope(row[0])
+    return render(request, "memory.html", rows=row, q="", kind="", embedder_status=None,
                   counts=_rows("SELECT kind,COUNT(*) count FROM memories GROUP BY kind"))
 
 

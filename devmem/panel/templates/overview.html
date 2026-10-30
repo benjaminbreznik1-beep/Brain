@@ -39,6 +39,23 @@
   </div>
 </div>
 
+{% for board in boards %}
+<div class="card">
+  <h2><a href="/memory/{{ board.id }}">{{ board.title }}</a></h2>
+  {% if board.status_as_of %}<p class="muted">Status as of {{ board.status_as_of }}.</p>{% endif %}
+  <table>
+    <thead><tr><th>Section</th><th>#</th><th>Task</th><th>Title</th><th>Phase</th></tr></thead>
+    <tbody>
+    {% for entry in board.entries %}
+      <tr><td><span class="badge">{{ entry.section }}</span></td><td class="mono">{{ entry.n }}</td><td class="mono">{{ entry.task }}</td><td>{{ entry.title }}</td><td>{{ entry.phase }}</td></tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">No task entries.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endfor %}
+
 <h2>Daily tokens, last 30 days</h2>
 <div class="card"><svg id="chart" class="chart" role="img" aria-label="Daily tokens per agent, last 30 days"></svg></div>
 
